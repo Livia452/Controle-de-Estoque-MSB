@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
 :root{
   --bg:#f0f5f6;--surface:#fff;--border:rgba(0,0,0,.10);--border-med:rgba(0,0,0,.18);
@@ -86,6 +87,9 @@ input,select{font-family:inherit;font-size:14px}
 
 /* Table */
 .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow);margin-bottom:1.75rem}
+/* Tabelas longas (muitas linhas): trava a altura pra rolagem horizontal ficar sempre visível, sem precisar rolar a página até o fim */
+.tbl-wrap-scroll{max-height:70vh;overflow-y:auto}
+.tbl-wrap-scroll thead th{position:sticky;top:0;z-index:1}
 table{width:100%;border-collapse:collapse;font-size:13px}
 .td-desc{max-width:220px;vertical-align:top}
 .td-desc>div{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.35;white-space:normal;font-size:12px}
@@ -247,6 +251,7 @@ tbody tr:hover td{background:var(--bg)}
         <i class="ti ti-edit" aria-hidden="true"></i> Atualizar estoque (PCP)
       </button>
     </div>
+    <div id="nav-auth" style="display:flex;align-items:center;gap:8px;padding:14px 0 0"></div>
   </div>
   <div id="view-dashboard" class="view active" role="tabpanel"></div>
   <div id="view-editor"    class="view"        role="tabpanel"></div>
@@ -280,6 +285,181 @@ function removeOldVersions(prefix, currentKey) {
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
     if (k && k.startsWith(prefix) && k !== currentKey) localStorage.removeItem(k);
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   SUPABASE — client, sessão e papéis
+   Leitura pública nos dados; escrita exige login (ver RLS em supabase/schema.sql).
+   Criação de usuário é só pelo admin, via api/create-user.js (chave secreta
+   nunca fica no navegador).
+═══════════════════════════════════════════════ */
+const SUPABASE_URL             = 'https://hytvtwtiekznvjhngtwl.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_8KRMNDDdFiJwUWxK0QtazQ_i0l_ADvx';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+
+let currentSession = null; // sessão do Supabase Auth, ou null
+let currentProfile = null; // { id, email, role } da tabela profiles, ou null
+
+function isLoggedIn() { return !!currentSession; }
+function isAdmin()    { return currentProfile?.role === 'admin'; }
+
+async function loadCurrentProfile() {
+  if (!currentSession) { currentProfile = null; return; }
+  const { data, error } = await sb.from('profiles').select('id,email,role').eq('id', currentSession.user.id).maybeSingle();
+  currentProfile = error ? null : data;
+}
+
+async function doLogin(email, password) {
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  currentSession = data.session;
+  await loadCurrentProfile();
+}
+
+async function doLogout() {
+  await sb.auth.signOut();
+  currentSession = null;
+  currentProfile = null;
+}
+
+function renderNavAuth() {
+  const el = document.getElementById('nav-auth');
+  if (!el) return;
+  if (!isLoggedIn()) {
+    el.innerHTML = `<button class="btn btn-ghost btn-sm" id="btn-open-login"><i class="ti ti-login" aria-hidden="true"></i> Entrar</button>`;
+    document.getElementById('btn-open-login')?.addEventListener('click', openLoginModal);
+    return;
+  }
+  el.innerHTML = `
+    <span style="font-size:12px;color:var(--muted)">${currentProfile?.email || currentSession.user.email}${isAdmin() ? ' · admin' : ''}</span>
+    ${isAdmin() ? `<button class="btn btn-ghost btn-sm" id="btn-manage-users"><i class="ti ti-users" aria-hidden="true"></i> Gerenciar usuários</button>` : ''}
+    <button class="btn btn-ghost btn-sm" id="btn-logout"><i class="ti ti-logout" aria-hidden="true"></i> Sair</button>
+  `;
+  document.getElementById('btn-manage-users')?.addEventListener('click', openManageUsersModal);
+  document.getElementById('btn-logout')?.addEventListener('click', async () => {
+    await doLogout();
+    renderNavAuth();
+    if (activeTab === 'editor') renderEditor();
+    showToast('Sessão encerrada.');
+  });
+}
+
+/* ── Modal de login (reaproveita #modal-overlay/#modal-body já usado pelo cadastro de item) ── */
+function openLoginModal() {
+  document.getElementById('modal-title').textContent = 'Entrar';
+  document.getElementById('modal-body').innerHTML = `
+    <div class="field-group">
+      <label class="field-label" for="f-login-email">E-mail</label>
+      <input class="field-input" id="f-login-email" type="email" autocomplete="username" placeholder="voce@msbbrasil.com">
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="f-login-pass">Senha</label>
+      <input class="field-input" id="f-login-pass" type="password" autocomplete="current-password">
+    </div>
+    <p class="field-error" id="form-error" role="alert" aria-live="polite"></p>
+    <div class="form-actions">
+      <button class="btn btn-ghost" id="btn-modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="btn-login-submit"><i class="ti ti-login" aria-hidden="true"></i> Entrar</button>
+    </div>`;
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeProductModal);
+  document.getElementById('btn-login-submit').addEventListener('click', onLoginSubmit);
+  document.getElementById('f-login-pass').addEventListener('keydown', e => { if (e.key === 'Enter') onLoginSubmit(); });
+  document.getElementById('modal-overlay').style.display = 'flex';
+  setTimeout(() => document.getElementById('f-login-email')?.focus(), 50);
+}
+
+async function onLoginSubmit() {
+  const errEl = document.getElementById('form-error');
+  errEl.textContent = '';
+  const email = document.getElementById('f-login-email')?.value.trim();
+  const pass  = document.getElementById('f-login-pass')?.value;
+  if (!email || !pass) { errEl.textContent = 'Informe e-mail e senha.'; return; }
+  const btn = document.getElementById('btn-login-submit');
+  btn.disabled = true;
+  try {
+    await doLogin(email, pass);
+    closeProductModal();
+    renderNavAuth();
+    if (activeTab === 'editor') renderEditor();
+    showToast(`Bem-vinda, ${currentProfile?.email || email}.`);
+  } catch (err) {
+    errEl.textContent = 'E-mail ou senha inválidos.';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ── Painel "Gerenciar usuários" (só admin) ── */
+async function openManageUsersModal() {
+  document.getElementById('modal-title').textContent = 'Gerenciar usuários';
+  document.getElementById('modal-body').innerHTML = `
+    <div id="users-list" style="margin-bottom:16px;font-size:13px;color:var(--muted)">Carregando…</div>
+    <div class="divider"></div>
+    <p class="section-title" style="margin-bottom:10px">Novo usuário</p>
+    <div class="field-group">
+      <label class="field-label" for="f-nu-email">E-mail</label>
+      <input class="field-input" id="f-nu-email" type="email">
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="f-nu-pass">Senha provisória</label>
+      <input class="field-input" id="f-nu-pass" type="text" placeholder="mín. 6 caracteres">
+    </div>
+    <div class="field-group">
+      <label class="field-label" for="f-nu-role">Papel</label>
+      <select class="field-input filter-select" id="f-nu-role">
+        <option value="user">Usuário</option>
+        <option value="admin">Administrador</option>
+      </select>
+    </div>
+    <p class="field-error" id="form-error" role="alert" aria-live="polite"></p>
+    <div class="form-actions">
+      <button class="btn btn-ghost" id="btn-modal-cancel">Fechar</button>
+      <button class="btn btn-primary" id="btn-nu-submit"><i class="ti ti-user-plus" aria-hidden="true"></i> Criar usuário</button>
+    </div>`;
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeProductModal);
+  document.getElementById('btn-nu-submit').addEventListener('click', onCreateUserSubmit);
+  document.getElementById('modal-overlay').style.display = 'flex';
+  loadUsersList();
+}
+
+async function loadUsersList() {
+  const el = document.getElementById('users-list');
+  if (!el) return;
+  const { data, error } = await sb.from('profiles').select('email,role').order('email');
+  if (error) { el.textContent = 'Erro ao carregar usuários: ' + error.message; return; }
+  el.innerHTML = (data||[]).map(u =>
+    `<div style="display:flex;justify-content:space-between;padding:4px 0">
+       <span>${u.email}</span><span class="badge ${u.role==='admin'?'b-high':'b-ok'}">${u.role}</span>
+     </div>`
+  ).join('') || 'Nenhum usuário cadastrado ainda.';
+}
+
+async function onCreateUserSubmit() {
+  const errEl = document.getElementById('form-error');
+  errEl.textContent = '';
+  const email    = document.getElementById('f-nu-email')?.value.trim();
+  const password = document.getElementById('f-nu-pass')?.value;
+  const role     = document.getElementById('f-nu-role')?.value;
+  if (!email || !password || password.length < 6) { errEl.textContent = 'E-mail válido e senha com pelo menos 6 caracteres.'; return; }
+  const btn = document.getElementById('btn-nu-submit');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/create-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${currentSession.access_token}` },
+      body: JSON.stringify({ email, password, role }),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || 'Falha ao criar usuário.');
+    showToast(`Usuário ${email} criado.`);
+    document.getElementById('f-nu-email').value = '';
+    document.getElementById('f-nu-pass').value = '';
+    loadUsersList();
+  } catch (err) {
+    errEl.textContent = err.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -572,27 +752,52 @@ function migrateProduct(raw) {
   return { ...rest, salesHistory };
 }
 
+function paRowToProduct(row) {
+  return migrateProduct({
+    code: row.code, description: row.description, family: row.family,
+    stock: row.stock, stockSA: row.stock_sa, salesHistory: row.sales_history || {},
+  });
+}
+function paProductToRow(p) {
+  return {
+    code: p.code, description: p.description, family: p.family,
+    stock: p.stock, stock_sa: p.stockSA, sales_history: p.salesHistory || {},
+    updated_at: new Date().toISOString(),
+  };
+}
+
 const storage = {
-  load() {
-    let saved = [];
-    try { const r = localStorage.getItem(STORAGE_KEY); saved = r ? JSON.parse(r).map(migrateProduct) : []; } catch {}
-    const savedMap = new Map(saved.map(p => [p.code, p]));
-    return SEED.map(seed => {
-      const s = savedMap.get(seed.code);
-      const family = FAMILY_MAP[seed.code] || s?.family || '';
-      return s ? { code: seed.code, description: s.description || seed.description, family, stock: s.stock ?? 0, stockSA: s.stockSA ?? 0, salesHistory: s.salesHistory ?? {} }
-               : { code: seed.code, description: seed.description, family, stock: 0, stockSA: 0, salesHistory: {} };
-    });
+  async load() {
+    const { data, error } = await sb.from('pa_products').select('*');
+    if (error) { showToast('Erro ao carregar produtos: ' + error.message, 'err'); return []; }
+    if (!data.length) {
+      // Base ainda vazia: semeia com o catálogo padrão (só grava se já tiver login, por causa da RLS)
+      const seeded = SEED.map(seed => ({ code: seed.code, description: seed.description, family: FAMILY_MAP[seed.code] || '', stock: 0, stockSA: 0, salesHistory: {} }));
+      if (isLoggedIn()) await storage.save(seeded);
+      return seeded;
+    }
+    return data.map(paRowToProduct);
   },
-  save(products) { localStorage.setItem(STORAGE_KEY, JSON.stringify(products)); },
-  clear()        { localStorage.removeItem(STORAGE_KEY); },
+  async save(products) {
+    if (!products.length) return;
+    const { error } = await sb.from('pa_products').upsert(products.map(paProductToRow));
+    if (error) showToast('Erro ao salvar produto: ' + error.message, 'err');
+  },
+  async remove(code) {
+    const { error } = await sb.from('pa_products').delete().eq('code', code);
+    if (error) showToast('Erro ao remover produto: ' + error.message, 'err');
+  },
+  async clear() {
+    const { error } = await sb.from('pa_products').delete().neq('code', '');
+    if (error) showToast('Erro ao limpar produtos: ' + error.message, 'err');
+  },
 };
 
 /* ═══════════════════════════════════════════════
-   STATE (pub/sub)
+   STATE (pub/sub) — hidratado do Supabase via state._setAll() no boot()
 ═══════════════════════════════════════════════ */
 const state = (() => {
-  let products = storage.load();
+  let products = [];
   const subs   = new Set();
   const notify = () => subs.forEach(fn => fn());
 
@@ -611,24 +816,27 @@ const state = (() => {
     getAll()        { return [...products]; },
     getByCode(code) { return products.find(p => p.code === String(code).toUpperCase()) ?? null; },
 
-    addOrUpdate(data) {
+    async addOrUpdate(data) {
       const p = normalise(data);
       const i = products.findIndex(x => x.code === p.code);
       if (i >= 0) products[i] = { ...products[i], ...p };
       else        products.push(p);
-      storage.save(products); notify();
+      notify();
+      await storage.save([p]);
     },
 
-    applyStockImport(items) {
+    async applyStockImport(items) {
+      const touched = [];
       for (const item of items) {
         const code = String(item.code).toUpperCase().trim();
         const existing = products.find(p => p.code === code);
-        if (existing) existing.stock = Math.max(0, Math.round(item.stock));
+        if (existing) { existing.stock = Math.max(0, Math.round(item.stock)); touched.push(existing); }
       }
-      storage.save(products); notify();
+      notify();
+      await storage.save(touched);
     },
 
-    applyStockSAImport(items) {
+    async applyStockSAImport(items) {
       // Zero all SA first — the Dynamics file is a full snapshot, so stale SA values must be cleared
       if (items.length > 0) products.forEach(p => { p.stockSA = 0; });
       for (const item of items) {
@@ -636,11 +844,13 @@ const state = (() => {
         const existing = products.find(p => p.code === code);
         if (existing) existing.stockSA = Math.max(0, Math.round(item.stock));
       }
-      storage.save(products); notify();
+      notify();
+      await storage.save(products); // zerou SA de todo mundo, precisa gravar todo mundo
     },
 
-    applySalesImport(salesMap) {
+    async applySalesImport(salesMap) {
       // salesMap: { code: { 'YYYY-MM': qty } }
+      const touched = [];
       for (const [code, monthData] of Object.entries(salesMap)) {
         const upper = code.toUpperCase();
         let p = products.find(x => x.code === upper);
@@ -649,13 +859,25 @@ const state = (() => {
         for (const [mk, qty] of Object.entries(monthData)) {
           p.salesHistory[mk] = Math.max(0, Math.round(qty));
         }
+        touched.push(p);
       }
-      storage.save(products); notify();
+      notify();
+      await storage.save(touched);
     },
 
-    remove(code) { products = products.filter(p => p.code !== String(code).toUpperCase()); storage.save(products); notify(); },
-    reset()      { storage.clear(); products = storage.load(); notify(); },
+    async remove(code) {
+      const upper = String(code).toUpperCase();
+      products = products.filter(p => p.code !== upper);
+      notify();
+      await storage.remove(upper);
+    },
+    async reset() {
+      await storage.clear();
+      products = await storage.load();
+      notify();
+    },
     subscribe(fn){ subs.add(fn); return () => subs.delete(fn); },
+    _setAll(arr) { products = arr; notify(); },
   };
 })();
 
@@ -1066,8 +1288,14 @@ function renderDashboard() {
   </div>`;
   document.getElementById('btn-share')?.addEventListener('click', generateShareFile);
   document.getElementById('f-dash-search')?.addEventListener('input', e => {
+    const pos = e.target.selectionStart;
     clearTimeout(_searchTimer);
-    _searchTimer = setTimeout(() => { dashFilters.search = e.target.value; renderDashboard(); }, 220);
+    _searchTimer = setTimeout(() => {
+      dashFilters.search = e.target.value;
+      renderDashboard();
+      const el = document.getElementById('f-dash-search');
+      if (el) { el.focus(); el.setSelectionRange(pos, pos); }
+    }, 220);
   });
   document.getElementById('f-dash-family')?.addEventListener('change', e => { dashFilters.family = e.target.value; renderDashboard(); });
   document.getElementById('f-dash-status')?.addEventListener('change', e => { dashFilters.status = e.target.value; renderDashboard(); });
@@ -1086,6 +1314,18 @@ let pendingStock = null; // { items, filename, skipped }
 let pendingSales = null; // { salesMap, months, filename, skipped }
 
 function renderEditor() {
+  if (!isLoggedIn()) {
+    editorEl.innerHTML = `
+      <div class="editor">
+        <div class="tbl-wrap"><div class="empty" style="padding:3rem 2rem">
+          <i class="ti ti-lock" style="font-size:36px;color:var(--hint)"></i>
+          <p style="margin-top:10px;color:var(--hint)">Você precisa <strong>entrar</strong> para atualizar cadastro, estoque, consumo e forecast.</p>
+          <button class="btn btn-primary" id="btn-editor-login" style="margin-top:14px"><i class="ti ti-login" aria-hidden="true"></i> Entrar</button>
+        </div></div>
+      </div>`;
+    document.getElementById('btn-editor-login')?.addEventListener('click', openLoginModal);
+    return;
+  }
   editorEl.innerHTML = `
     <div class="editor">
       <h1 class="page-title" style="margin-bottom:1.5rem">Atualizar estoque (PCP)</h1>
@@ -1748,10 +1988,64 @@ const MEMS_SEED = [
   {code:'ME0002049',desc:'ETIQUETA FRENCH 6.0 FR (VERDE)',type:'ME',family:'ETIQUETA',supplier:'Ecolacre',origin:'BA',leadTime:1},
 ];
 
-let memsItems = loadJSON(MEMS_KEY, null)
-  || MEMS_SEED.map(i => ({ ...i, stock:0, avgForecast:0, avgConsumption:0, inTransit:0, consumoHistory:{}, forecastHistory:{}, transitEntries:[] }));
-let memsMeta = loadJSON(MEMS_META_KEY, {});
-function saveMemsMeta() { saveJSON(MEMS_META_KEY, memsMeta); }
+function materialRowToItem(row) {
+  return {
+    code: row.code, desc: row.description, type: row.type, family: row.family,
+    supplier: row.supplier, origin: row.origin, leadTime: row.lead_time,
+    stock: row.stock, avgForecast: row.avg_forecast, avgConsumption: row.avg_consumption,
+    inTransit: row.in_transit, consumoHistory: row.consumo_history || {},
+    forecastHistory: row.forecast_history || {}, transitEntries: row.transit_entries || [],
+  };
+}
+function materialItemToRow(item) {
+  return {
+    code: item.code, description: item.desc || '', type: item.type || '', family: item.family || '',
+    supplier: item.supplier || '', origin: item.origin || '', lead_time: item.leadTime ?? null,
+    stock: item.stock || 0, avg_forecast: item.avgForecast || 0, avg_consumption: item.avgConsumption || 0,
+    in_transit: item.inTransit || 0, consumo_history: item.consumoHistory || {},
+    forecast_history: item.forecastHistory || {}, transit_entries: item.transitEntries || [],
+    updated_at: new Date().toISOString(),
+  };
+}
+async function loadMemsItems() {
+  const { data, error } = await sb.from('materials').select('*');
+  if (error) { showToast('Erro ao carregar materiais: ' + error.message, 'err'); return []; }
+  if (!data.length) {
+    const seeded = MEMS_SEED.map(i => ({ ...i, stock:0, avgForecast:0, avgConsumption:0, inTransit:0, consumoHistory:{}, forecastHistory:{}, transitEntries:[] }));
+    if (isLoggedIn()) await saveMemsItems(seeded);
+    return seeded;
+  }
+  return data.map(materialRowToItem);
+}
+async function saveMemsItems(items) {
+  const rows = items || memsItems;
+  if (!rows.length) return;
+  const { error } = await sb.from('materials').upsert(rows.map(materialItemToRow));
+  if (error) showToast('Erro ao salvar materiais: ' + error.message, 'err');
+}
+
+let memsItems = [];
+
+async function loadMemsMeta() {
+  const { data, error } = await sb.from('materials_meta').select('*').eq('id', true).maybeSingle();
+  if (error || !data) return {};
+  return {
+    stockUpdatedAt: data.stock_updated_at, consumoUpdatedAt: data.consumo_updated_at,
+    forecastUpdatedAt: data.forecast_updated_at, transitoUpdatedAt: data.transito_updated_at,
+    bomUpdatedAt: data.bom_updated_at,
+  };
+}
+async function saveMemsMeta() {
+  const { error } = await sb.from('materials_meta').update({
+    stock_updated_at: memsMeta.stockUpdatedAt ?? null,
+    consumo_updated_at: memsMeta.consumoUpdatedAt ?? null,
+    forecast_updated_at: memsMeta.forecastUpdatedAt ?? null,
+    transito_updated_at: memsMeta.transitoUpdatedAt ?? null,
+    bom_updated_at: memsMeta.bomUpdatedAt ?? null,
+  }).eq('id', true);
+  if (error) showToast('Erro ao salvar metadados de materiais: ' + error.message, 'err');
+}
+let memsMeta = {};
 
 let memsFilters         = { search: '', type: '', family: '', supplier: '', status: '', hideNoGiro: false };
 
@@ -1784,6 +2078,10 @@ let memsVisibleCols = (() => {
 })();
 let memsColsOpen = false;
 function saveMemsVisibleCols() { saveJSON(MEMS_COLS_KEY, [...memsVisibleCols]); }
+// Clicar fora do seletor de colunas fecha a janela suspensa
+document.addEventListener('click', e => {
+  if (memsColsOpen && !e.target.closest('.col-picker')) { memsColsOpen = false; renderMems(); }
+});
 
 // Toggle "considerar só consumo real": por padrão (false) a cobertura/alertas usam o
 // pior caso (max entre forecast e consumo real); ligado, ignora o forecast por
@@ -1801,13 +2099,39 @@ let pendingMemsBom      = null; // estrutura de produtos (planilha de consumo po
 
 // Estrutura de produtos: lista de relações {code, parent, final, qty, unit} —
 // qty = unidades do componente consumidas por 1 unidade do próximo uso (parent)
-let memsBom = loadJSON(MEMS_BOM_KEY, []);
-function saveMemsBom() { saveJSON(MEMS_BOM_KEY, memsBom); }
+let memsBom = [];
+async function loadMemsBom() {
+  const { data, error } = await sb.from('materials_bom').select('code,parent,final,qty,unit');
+  if (error) { showToast('Erro ao carregar estrutura: ' + error.message, 'err'); return []; }
+  return data;
+}
+async function saveMemsBom() {
+  const { error: delErr } = await sb.from('materials_bom').delete().neq('code', '');
+  if (delErr) { showToast('Erro ao salvar estrutura: ' + delErr.message, 'err'); return; }
+  if (!memsBom.length) return;
+  const { error } = await sb.from('materials_bom').insert(
+    memsBom.map(e => ({ code: e.code, parent: e.parent, final: e.final || '', qty: e.qty || 1, unit: e.unit || '' }))
+  );
+  if (error) showToast('Erro ao salvar estrutura: ' + error.message, 'err');
+}
 // Estoque dos nós da estrutura que não são materiais nem PA (ex: PIs), capturado no import de estoque
-let memsBomStock = loadJSON(MEMS_BOM_STOCK_KEY, {});
-function saveMemsBomStock() { saveJSON(MEMS_BOM_STOCK_KEY, memsBomStock); }
-
-function saveMemsItems() { saveJSON(MEMS_KEY, memsItems); }
+let memsBomStock = {};
+async function loadMemsBomStock() {
+  const { data, error } = await sb.from('materials_bom_stock').select('code,stock');
+  if (error) { showToast('Erro ao carregar estoque da estrutura: ' + error.message, 'err'); return {}; }
+  const map = {};
+  data.forEach(r => { map[r.code] = r.stock; });
+  return map;
+}
+async function saveMemsBomStock() {
+  const codes = Object.keys(memsBomStock);
+  const { error: delErr } = await sb.from('materials_bom_stock').delete().neq('code', '');
+  if (delErr) { showToast('Erro ao salvar estoque da estrutura: ' + delErr.message, 'err'); return; }
+  if (!codes.length) return;
+  const rows = codes.map(code => ({ code, stock: memsBomStock[code], updated_at: new Date().toISOString() }));
+  const { error } = await sb.from('materials_bom_stock').upsert(rows);
+  if (error) showToast('Erro ao salvar estoque da estrutura: ' + error.message, 'err');
+}
 
 // Consumo mensal (últimos 6 meses) a partir do histórico importado da planilha bruta do Dynamics
 function memsGetMonthlyConsumo(item) {
@@ -2269,7 +2593,7 @@ function renderMems() {
         </label>
         <span class="filter-results">${filtered.length} / ${memsItems.length} itens</span>
       </div>
-      <div class="tbl-wrap">
+      <div class="tbl-wrap tbl-wrap-scroll">
         <table>
           <thead><tr>
             <th>Código</th>
@@ -2347,7 +2671,14 @@ function renderMems() {
 
   let _mt;
   document.getElementById('mems-search')?.addEventListener('input', e => {
-    clearTimeout(_mt); _mt = setTimeout(() => { memsFilters.search = e.target.value; renderMems(); }, 220);
+    const pos = e.target.selectionStart;
+    clearTimeout(_mt);
+    _mt = setTimeout(() => {
+      memsFilters.search = e.target.value;
+      renderMems();
+      const el = document.getElementById('mems-search');
+      if (el) { el.focus(); el.setSelectionRange(pos, pos); }
+    }, 220);
   });
   document.querySelectorAll('[data-mtype]').forEach(btn => {
     btn.addEventListener('click', () => { memsFilters.type = btn.dataset.mtype; memsFilters.supplier = ''; renderMems(); });
@@ -2980,8 +3311,111 @@ function applyMemsForecastImport() {
   }, 0);
 }
 
+/* ── Migração de dados locais (localStorage) para o Supabase ──────────────
+   Só relevante pra quem já usava o app antes da nuvem existir: se detectar
+   dados nas chaves antigas do localStorage E a nuvem ainda estiver vazia,
+   oferece subir tudo de uma vez (em vez de silenciosamente semear o catálogo
+   padrão, que é o que acontece quando não há nada pra migrar). ── */
+function readLegacyLocalData() {
+  const pa        = loadJSON(STORAGE_KEY, null);
+  const materials = loadJSON(MEMS_KEY, null);
+  const hasData = (Array.isArray(pa) && pa.length) || (Array.isArray(materials) && materials.length);
+  if (!hasData) return null;
+  return {
+    pa:        Array.isArray(pa) ? pa : [],
+    materials: Array.isArray(materials) ? materials : [],
+    bom:       loadJSON(MEMS_BOM_KEY, []),
+    bomStock:  loadJSON(MEMS_BOM_STOCK_KEY, {}),
+    meta:      loadJSON(MEMS_META_KEY, {}),
+  };
+}
+async function isCloudDataEmpty() {
+  const [pa, mat] = await Promise.all([
+    sb.from('pa_products').select('code', { count: 'exact', head: true }),
+    sb.from('materials').select('code', { count: 'exact', head: true }),
+  ]);
+  return (pa.count || 0) === 0 && (mat.count || 0) === 0;
+}
+let legacyLocalData = null;
+async function offerLocalMigrationIfAny() {
+  if (!isLoggedIn()) return;
+  const legacy = readLegacyLocalData();
+  if (!legacy) return;
+  if (!(await isCloudDataEmpty())) return; // nuvem já tem dado — não oferece sobrescrever
+  legacyLocalData = legacy;
+  showMigrationBanner();
+}
+function showMigrationBanner() {
+  if (!legacyLocalData || document.getElementById('migration-banner')) return;
+  const bar = document.createElement('div');
+  bar.id = 'migration-banner';
+  bar.className = 'alert';
+  bar.style.margin = '12px 24px 0';
+  bar.innerHTML = `
+    <i class="ti ti-cloud-upload" aria-hidden="true"></i>
+    Detectamos dados salvos neste navegador (${legacyLocalData.pa.length} PA · ${legacyLocalData.materials.length} materiais).
+    <button class="btn btn-primary btn-sm" id="btn-migrate-now" style="margin-left:auto"><i class="ti ti-cloud-upload" aria-hidden="true"></i> Migrar para a nuvem</button>
+    <button class="btn btn-ghost btn-sm" id="btn-migrate-dismiss">Ignorar</button>
+  `;
+  document.querySelector('.app')?.prepend(bar);
+  document.getElementById('btn-migrate-dismiss')?.addEventListener('click', () => bar.remove());
+  document.getElementById('btn-migrate-now')?.addEventListener('click', runLocalMigration);
+}
+async function runLocalMigration() {
+  if (!legacyLocalData) return;
+  showLoading('Migrando dados para a nuvem…');
+  try {
+    if (legacyLocalData.pa.length)                       { state._setAll(legacyLocalData.pa); await storage.save(legacyLocalData.pa); }
+    if (legacyLocalData.materials.length)                 { memsItems = legacyLocalData.materials; await saveMemsItems(); }
+    if (legacyLocalData.bom.length)                       { memsBom = legacyLocalData.bom; await saveMemsBom(); }
+    if (Object.keys(legacyLocalData.bomStock || {}).length) { memsBomStock = legacyLocalData.bomStock; await saveMemsBomStock(); }
+    if (Object.keys(legacyLocalData.meta || {}).length)     { memsMeta = legacyLocalData.meta; await saveMemsMeta(); }
+    document.getElementById('migration-banner')?.remove();
+    legacyLocalData = null;
+    showToast('Dados migrados para a nuvem.');
+    if (activeTab === 'dashboard') renderDashboard();
+    else if (activeTab === 'mems') renderMems();
+    else renderEditor();
+  } catch (err) {
+    showToast('Erro na migração: ' + err.message, 'err');
+  } finally {
+    hideLoading();
+  }
+}
+
 /* ── Boot ── */
-renderDashboard();
+async function boot() {
+  showLoading('Carregando dados…');
+  try {
+    const { data: sessionData } = await sb.auth.getSession();
+    currentSession = sessionData?.session ?? null;
+    await loadCurrentProfile();
+
+    const [products, materials, meta, bom, bomStock] = await Promise.all([
+      storage.load(),
+      loadMemsItems(),
+      loadMemsMeta(),
+      loadMemsBom(),
+      loadMemsBomStock(),
+    ]);
+    state._setAll(products);
+    memsItems    = materials;
+    memsMeta     = meta;
+    memsBom      = bom;
+    memsBomStock = bomStock;
+  } catch (err) {
+    showToast('Erro ao carregar dados: ' + err.message, 'err');
+  } finally {
+    hideLoading();
+  }
+
+  renderNavAuth();
+  await offerLocalMigrationIfAny();
+  if (activeTab === 'dashboard') renderDashboard();
+  else if (activeTab === 'mems') renderMems();
+  else renderEditor();
+}
+boot();
 
 /* ═══════════════════════════════════════════════
    MODAL — produto (novo / editar)
