@@ -78,6 +78,12 @@ input,select{font-family:inherit;font-size:14px}
 .modal-title{font-size:16px;font-weight:500}
 .modal-body{padding:20px 24px;overflow-y:auto}
 
+/* Loading overlay */
+.loading-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 8px 32px rgba(0,0,0,.18);padding:32px 40px;display:flex;flex-direction:column;align-items:center;gap:14px}
+.spinner{width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading-text{font-size:14px;color:var(--text)}
+
 /* Table */
 .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow);margin-bottom:1.75rem}
 table{width:100%;border-collapse:collapse;font-size:13px}
@@ -137,6 +143,11 @@ tbody tr:hover td{background:var(--bg)}
 .lgd-swatch{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:4px}
 .clickable-cell{cursor:pointer;text-decoration:underline dotted var(--muted);color:var(--accent)!important}
 .clickable-cell:hover{text-decoration:underline solid var(--accent)}
+/* Seletor de colunas (estilo Power BI) */
+.col-picker{position:relative}
+.col-picker-menu{position:absolute;top:calc(100% + 4px);right:0;z-index:200;background:var(--surface);border:1px solid var(--border-med);border-radius:var(--r-md);box-shadow:0 6px 24px rgba(0,0,0,.15);padding:10px 14px;min-width:190px;max-height:300px;overflow-y:auto}
+.col-picker-menu label{display:flex;gap:8px;align-items:center;font-size:13px;padding:4px 0;cursor:pointer;white-space:nowrap;color:var(--text)}
+.col-picker-menu .col-picker-all{border-bottom:1px solid var(--border);padding-bottom:7px;margin-bottom:5px}
 .lgd-line{display:flex;align-items:center;gap:5px;margin-left:auto}
 .lgd-dash{display:inline-block;width:20px;border-top:2px dashed #185FA5}
 .chart-view-tabs{display:flex;gap:6px;flex-wrap:wrap}
@@ -242,6 +253,9 @@ tbody tr:hover td{background:var(--bg)}
   <div id="view-mems"      class="view"        role="tabpanel"></div>
 </div>
 <div class="toast" id="toast" aria-live="assertive"></div>
+<div class="modal-overlay" id="loading-overlay" style="display:none" role="alert" aria-live="assertive">
+  <div class="loading-box"><div class="spinner" aria-hidden="true"></div><p class="loading-text" id="loading-text"></p></div>
+</div>
 
 <script>
 /* ═══════════════════════════════════════════════
@@ -249,6 +263,25 @@ tbody tr:hover td{background:var(--bg)}
 ═══════════════════════════════════════════════ */
 const STORAGE_KEY  = 'pcp_pa_v4';
 const MONTHS_COUNT = 6;
+
+/* Padrão de versionamento das chaves do localStorage: sufixo "_vN" no nome da chave
+   (ex: pcp_mems_cols_v2). Quando o formato de uma chave muda de forma incompatível,
+   suba o N e apague a chave antiga com removeOldVersions — não deixe a versão velha
+   órfã pra sempre. loadJSON/saveJSON existem pra não repetir o try/JSON.parse/catch
+   em cada `let xxx = (() => {...})()` espalhado pelo arquivo. */
+function loadJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+function saveJSON(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+function removeOldVersions(prefix, currentKey) {
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith(prefix) && k !== currentKey) localStorage.removeItem(k);
+  }
+}
 
 const STATUS = { CRIT:'crit', WARN:'warn', OK:'ok', HIGH:'high', EXCESS:'excess', NOGIRO:'nogiro' };
 const STATUS_META = {
@@ -272,10 +305,11 @@ const COL_STOCK = {
   qty:  'Quantidade física disponível',
 };
 const COL_SALES = {
-  code: 'Número do item',
-  date: 'Data física',
-  exit: 'Saída',
-  qty:  'Quantidade',
+  code:    'Número do item',
+  date:    'Data física',
+  exit:    'Saída',
+  receipt: 'Recebimento',
+  qty:     'Quantidade',
 };
 
 /* ═══════════════════════════════════════════════
@@ -285,6 +319,16 @@ function getLast6Keys() {
   const now = new Date();
   return Array.from({length: 6}, (_, i) => {
     const d = new Date(now.getFullYear(), now.getMonth() - 6 + i, 1);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  });
+}
+// Janela de 6 meses PRA FRENTE, começando no mês atual — usada pelo forecast
+// (que é prospectivo), ao contrário de getLast6Keys (retrospectiva, usada pelo
+// consumo real medido).
+function getNext6Keys() {
+  const now = new Date();
+  return Array.from({length: 6}, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
   });
 }
@@ -303,6 +347,9 @@ function getMonthlySales(p) {
   const sh = p.salesHistory || {};
   return getLast6Keys().map(k => sh[k] || 0);
 }
+// Espera um PRODUTO ACABADO (p.salesHistory) — para MATERIAIS (ME/MP/MS) use
+// memsAvgConsumption(item), que lê item.consumoHistory. Não são intercambiáveis:
+// chamar essa função com um material silenciosamente retorna 0 (sem erro).
 function avgConsumption(p) {
   const ms = getMonthlySales(p);
   return ms.reduce((a, b) => a + b, 0) / ms.length;
@@ -600,7 +647,7 @@ const state = (() => {
         if (!p) continue;
         if (!p.salesHistory) p.salesHistory = {};
         for (const [mk, qty] of Object.entries(monthData)) {
-          p.salesHistory[mk] = Math.round(qty);
+          p.salesHistory[mk] = Math.max(0, Math.round(qty));
         }
       }
       storage.save(products); notify();
@@ -676,15 +723,23 @@ function aggregateStock(rows) {
   return { items: Object.values(map), skipped };
 }
 
-/* Agrega vendas: soma abs(Quantidade) por (Número do item + mês de Data física)
-   Filtra apenas linhas onde coluna "Saída" não está vazia (movimentos de saída) */
+/* Agrega vendas: soma abs(Quantidade) por (Número do item + mês de Data física) para linhas
+   "Saída" (vendido), subtraindo as linhas "Recebimento" (comprado) do mesmo item/mês — no
+   Dynamics, um "Comprado" é a reposição/estorno de um "Vendido" (ex: consignado) e precisa
+   ser líquido, senão o total fica maior do que o relatório de vendas do Dynamics.
+   Códigos "SA-..." (estoque secundário/consignado) são redirecionados para o produto PA
+   correspondente via SA_REVERSE_MAP, do mesmo jeito que a importação de estoque já faz —
+   senão as vendas lançadas sob o código SA ficam de fora do histórico do produto. */
 function aggregateSales(rows) {
   const map = {};
   let skipped = 0;
   for (const row of rows) {
-    const code  = String(row[COL_SALES.code] || '').trim();
+    let code    = String(row[COL_SALES.code] || '').trim();
     const saida = String(row[COL_SALES.exit] || '').trim();
-    if (!code || !saida) { skipped++; continue; }
+    const receb = String(row[COL_SALES.receipt] || '').trim();
+    if (!code || (!saida && !receb)) { skipped++; continue; }
+    const paCode = SA_REVERSE_MAP[code.toUpperCase()];
+    if (paCode) code = paCode;
 
     const qty = toNum(row[COL_SALES.qty]);
     if (qty === 0) continue;
@@ -694,9 +749,34 @@ function aggregateSales(rows) {
 
     const mk = toMonthKey(date);
     if (!map[code]) map[code] = {};
-    map[code][mk] = (map[code][mk] || 0) + Math.abs(qty);
+    map[code][mk] = (map[code][mk] || 0) + (saida ? Math.abs(qty) : -Math.abs(qty));
   }
   return { salesMap: map, skipped };
+}
+
+/* Agrega consumo de materiais (mesmo layout de planilha bruta do Dynamics usado nas vendas,
+   trocando "produto vendido" por "material consumido"): soma "Saída", subtrai "Recebimento",
+   por (código do material + mês). Sem redirecionamento SA→PA, que é exclusivo de produto acabado. */
+function aggregateMemsConsumo(rows) {
+  const map = {};
+  let skipped = 0;
+  for (const row of rows) {
+    const code  = String(row[COL_SALES.code] || '').trim().toUpperCase();
+    const saida = String(row[COL_SALES.exit] || '').trim();
+    const receb = String(row[COL_SALES.receipt] || '').trim();
+    if (!code || (!saida && !receb)) { skipped++; continue; }
+
+    const qty = toNum(row[COL_SALES.qty]);
+    if (qty === 0) continue;
+
+    const date = toDate(row[COL_SALES.date]);
+    if (!date) { skipped++; continue; }
+
+    const mk = toMonthKey(date);
+    if (!map[code]) map[code] = {};
+    map[code][mk] = (map[code][mk] || 0) + (saida ? Math.abs(qty) : -Math.abs(qty));
+  }
+  return { consumoMap: map, skipped };
 }
 
 /* ═══════════════════════════════════════════════
@@ -709,6 +789,14 @@ function showToast(msg, type = 'ok') {
   el.innerHTML = `<i class="ti ${icon}" aria-hidden="true"></i> ${msg}`;
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.remove('show'), 3500);
+}
+
+function showLoading(msg) {
+  document.getElementById('loading-text').textContent = msg;
+  document.getElementById('loading-overlay').style.display = 'flex';
+}
+function hideLoading() {
+  document.getElementById('loading-overlay').style.display = 'none';
 }
 
 /* ═══════════════════════════════════════════════
@@ -1153,29 +1241,36 @@ function setupDragDrop(dzId, fiId) {
 /* ── Stock import handlers (PA + SA + Materiais, tudo do mesmo arquivo) ── */
 async function handleStockFile(file) {
   if (!file) return;
+  showLoading('Lendo arquivo de estoque…');
   try {
     const rows = await readExcelFile(file);
     const { items, skipped } = aggregateStock(rows);
     if (!items.length) { showToast('Nenhum item encontrado. Verifique as colunas do arquivo.', 'err'); return; }
     const memsCodeSet = new Set(memsItems.map(i => i.code.toUpperCase()));
-    const paItems = [], saItems = [], memsMatched = [];
+    const paCodeSet   = new Set(state.getAll().map(p => p.code.toUpperCase()));
+    // Nós da estrutura que não vivem em nenhum outro cadastro (ex: PIs) — estoque vai para memsBomStock
+    const bomNodeSet  = new Set(memsBom.flatMap(e => [String(e.code).toUpperCase(), String(e.parent).toUpperCase()]));
+    const paItems = [], saItems = [], memsMatched = [], bomMatched = [];
     for (const item of items) {
       const code = String(item.code).toUpperCase().trim();
       const paCode = SA_REVERSE_MAP[code];
       if (paCode) saItems.push({ ...item, saCode: code, code: String(paCode).toUpperCase().trim() });
       else if (memsCodeSet.has(code)) memsMatched.push({ ...item, code });
+      else if (!paCodeSet.has(code) && bomNodeSet.has(code)) bomMatched.push({ ...item, code });
       else paItems.push({ ...item, code }); // normalise to uppercase
     }
-    pendingStock = { paItems, saItems, memsMatched, filename: file.name, skipped, totalRows: rows.length };
+    pendingStock = { paItems, saItems, memsMatched, bomMatched, filename: file.name, skipped, totalRows: rows.length };
     renderStockPreview();
   } catch(err) {
     showToast('Erro ao ler o arquivo: ' + err.message, 'err');
+  } finally {
+    hideLoading();
   }
 }
 
 function renderStockPreview() {
   if (!pendingStock) return;
-  const { paItems, saItems, memsMatched, filename, skipped, totalRows } = pendingStock;
+  const { paItems, saItems, memsMatched, bomMatched = [], filename, skipped, totalRows } = pendingStock;
   const existing = new Set(state.getAll().map(p => p.code));
   const knownPA = paItems.filter(i => existing.has(i.code.toUpperCase()));
   const knownSA = saItems.filter(i => existing.has(i.code.toUpperCase()));
@@ -1205,8 +1300,14 @@ function renderStockPreview() {
       <td style="text-align:right">${fmt.int(item.stock)}</td>
       <td><span class="badge" style="background:var(--accent-bg);color:var(--accent)">Material</span></td>
     </tr>`),
+    ...bomMatched.map(item => `<tr>
+      <td><strong>${item.code}</strong></td>
+      <td>${item.description || '—'}</td>
+      <td style="text-align:right">${fmt.int(item.stock)}</td>
+      <td><span class="badge b-high">Estrutura (PI)</span></td>
+    </tr>`),
   ].join('');
-  count.textContent = `${knownPA.length} PA · ${knownSA.length} SA · ${memsMatched.length} materiais · ${ignoredCount} ignorados`;
+  count.textContent = `${knownPA.length} PA · ${knownSA.length} SA · ${memsMatched.length} materiais${bomMatched.length ? ` · ${bomMatched.length} estrutura` : ''} · ${ignoredCount} ignorados`;
 }
 
 function cancelStockImport() {
@@ -1219,26 +1320,35 @@ function cancelStockImport() {
 
 function applyStockImport() {
   if (!pendingStock) return;
-  const { paItems, saItems, memsMatched } = pendingStock;
-  if (paItems.length) state.applyStockImport(paItems);
-  if (saItems.length) state.applyStockSAImport(saItems);
-  if (memsMatched.length) {
-    memsItems.forEach(i => { i.stock = 0; });
-    memsMatched.forEach(item => {
-      const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
-      if (existing) existing.stock = Math.max(0, Math.round(item.stock));
-    });
-    saveMemsItems();
-    memsMeta.stockUpdatedAt = new Date().toISOString();
-    saveMemsMeta();
-  }
-  showToast(`Estoque atualizado: ${paItems.length} PA · ${saItems.length} SA · ${memsMatched.length} materiais`);
-  cancelStockImport();
+  showLoading('Atualizando estoque…');
+  setTimeout(() => {
+    const { paItems, saItems, memsMatched, bomMatched = [] } = pendingStock;
+    if (paItems.length) state.applyStockImport(paItems);
+    if (saItems.length) state.applyStockSAImport(saItems);
+    if (memsMatched.length) {
+      memsItems.forEach(i => { i.stock = 0; });
+      memsMatched.forEach(item => {
+        const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
+        if (existing) existing.stock = Math.max(0, Math.round(item.stock));
+      });
+      saveMemsItems();
+      memsMeta.stockUpdatedAt = new Date().toISOString();
+      saveMemsMeta();
+    }
+    // Snapshot completo: zera e regrava o estoque dos nós da estrutura (PIs etc.)
+    memsBomStock = {};
+    bomMatched.forEach(item => { memsBomStock[item.code] = Math.max(0, Math.round(item.stock)); });
+    saveMemsBomStock();
+    hideLoading();
+    showToast(`Estoque atualizado: ${paItems.length} PA · ${saItems.length} SA · ${memsMatched.length} materiais${bomMatched.length ? ` · ${bomMatched.length} estrutura` : ''}`);
+    cancelStockImport();
+  }, 0);
 }
 
 /* ── Sales import handlers ── */
 async function handleSalesFile(file) {
   if (!file) return;
+  showLoading('Lendo arquivo de vendas…');
   try {
     const rows = await readExcelFile(file);
     const { salesMap, skipped } = aggregateSales(rows);
@@ -1252,6 +1362,8 @@ async function handleSalesFile(file) {
     renderSalesPreview();
   } catch(err) {
     showToast('Erro ao ler o arquivo: ' + err.message, 'err');
+  } finally {
+    hideLoading();
   }
 }
 
@@ -1285,11 +1397,15 @@ function cancelSalesImport() {
 
 function applySalesImport() {
   if (!pendingSales) return;
-  state.applySalesImport(pendingSales.salesMap);
-  const n = Object.keys(pendingSales.salesMap).length;
-  const m = pendingSales.months.map(fmtMonthKey).join(', ');
-  showToast(`Vendas atualizadas: ${n} produtos · ${m}`);
-  cancelSalesImport();
+  showLoading('Atualizando vendas…');
+  setTimeout(() => {
+    state.applySalesImport(pendingSales.salesMap);
+    const n = Object.keys(pendingSales.salesMap).length;
+    const m = pendingSales.months.map(fmtMonthKey).join(', ');
+    hideLoading();
+    showToast(`Vendas atualizadas: ${n} produtos · ${m}`);
+    cancelSalesImport();
+  }, 0);
 }
 
 /* ── Manual form ── */
@@ -1314,7 +1430,7 @@ function onSaveManual() {
     memsItems.push({
       code: upperCode, desc, type, family, supplier, origin,
       leadTime: isNaN(leadRaw) ? null : Math.ceil(leadRaw),
-      stock: 0, avgForecast: 0, avgConsumption: 0, worstCase: 0, inTransit: 0, reorderPoint: 0,
+      stock: 0, avgForecast: 0, avgConsumption: 0, inTransit: 0, consumoHistory: {}, forecastHistory: {}, transitEntries: [],
     });
     saveMemsItems();
     closeProductModal();
@@ -1372,8 +1488,10 @@ state.subscribe(() => {
 /* ═══════════════════════════════════════════════
    ME · MP · MS — STATE & RENDER
 ═══════════════════════════════════════════════ */
-const MEMS_KEY      = 'pcp_mems_v1';
-const MEMS_META_KEY = 'pcp_mems_meta_v1';
+const MEMS_KEY       = 'pcp_mems_v1';
+const MEMS_META_KEY  = 'pcp_mems_meta_v1';
+const MEMS_BOM_KEY   = 'pcp_mems_bom_v1';       // estrutura de produtos (quem consome quem, com quantidades)
+const MEMS_BOM_STOCK_KEY = 'pcp_mems_bom_stock_v1'; // estoque dos nós da estrutura fora do cadastro (ex: PIs)
 const memsEl        = document.getElementById('view-mems');
 
 const MEMS_SEED = [
@@ -1630,90 +1748,400 @@ const MEMS_SEED = [
   {code:'ME0002049',desc:'ETIQUETA FRENCH 6.0 FR (VERDE)',type:'ME',family:'ETIQUETA',supplier:'Ecolacre',origin:'BA',leadTime:1},
 ];
 
-let memsItems = (() => {
-  try {
-    const raw = localStorage.getItem(MEMS_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch {}
-  return MEMS_SEED.map(i => ({ ...i, stock:0, avgForecast:0, avgConsumption:0, worstCase:0, inTransit:0, reorderPoint:0 }));
-})();
-let memsMeta = (() => {
-  try { return JSON.parse(localStorage.getItem(MEMS_META_KEY) || '{}'); } catch { return {}; }
-})();
-function saveMemsMeta() { localStorage.setItem(MEMS_META_KEY, JSON.stringify(memsMeta)); }
+let memsItems = loadJSON(MEMS_KEY, null)
+  || MEMS_SEED.map(i => ({ ...i, stock:0, avgForecast:0, avgConsumption:0, inTransit:0, consumoHistory:{}, forecastHistory:{}, transitEntries:[] }));
+let memsMeta = loadJSON(MEMS_META_KEY, {});
+function saveMemsMeta() { saveJSON(MEMS_META_KEY, memsMeta); }
 
-let memsFilters         = { search: '', type: '', family: '', supplier: '', status: '' };
+let memsFilters         = { search: '', type: '', family: '', supplier: '', status: '', hideNoGiro: false };
+
+// Colunas da tabela de materiais — o usuário escolhe quais aparecem (Código é fixa).
+// "Cob. Pior Caso" foi removida de propósito: com o pior caso já sendo o consumo
+// padrão da própria "Cobertura" (ver memsEffectiveConsumption), as duas colunas
+// sempre mostravam o mesmo número — 100% redundante, só bagunça.
+const MEMS_COLS_KEY = 'pcp_mems_cols_v4'; // v4: remove "Cob. Pior Caso" (redundante); padrão enxuto
+const MEMS_COLUMNS = [
+  { key: 'desc',       label: 'Descrição' },
+  { key: 'tipo',       label: 'Tipo' },
+  { key: 'familia',    label: 'Família' },
+  { key: 'fornecedor', label: 'Fornecedor' },
+  { key: 'origem',     label: 'Origem' },
+  { key: 'leadtime',   label: 'Lead Time' },
+  { key: 'estoque',    label: 'Estoque' },
+  { key: 'consumo',    label: 'Consumo Médio' },
+  { key: 'forecast',   label: 'Média Forecast' },
+  { key: 'transito',   label: 'Em Trânsito' },
+  { key: 'cobertura',  label: 'Cobertura' },
+  { key: 'cobpropria', label: 'Cobertura própria' },
+  { key: 'status',     label: 'Status' },
+];
+// Conjunto enxuto pra quem nunca mexeu no seletor — o resto fica a 1 clique em "Colunas"
+const MEMS_COLS_DEFAULT = ['desc', 'tipo', 'estoque', 'consumo', 'forecast', 'cobertura', 'status'];
+removeOldVersions('pcp_mems_cols_v', MEMS_COLS_KEY); // limpa pcp_mems_cols_v1/v2/v3 órfãs
+let memsVisibleCols = (() => {
+  const r = loadJSON(MEMS_COLS_KEY, null);
+  return Array.isArray(r) && r.length ? new Set(r) : new Set(MEMS_COLS_DEFAULT);
+})();
+let memsColsOpen = false;
+function saveMemsVisibleCols() { saveJSON(MEMS_COLS_KEY, [...memsVisibleCols]); }
+
+// Toggle "considerar só consumo real": por padrão (false) a cobertura/alertas usam o
+// pior caso (max entre forecast e consumo real); ligado, ignora o forecast por
+// completo — usado só pra decidir o que a coluna Cobertura/alertas enxergam, não
+// apaga os dados de forecast já importados.
+const MEMS_REALONLY_KEY = 'pcp_mems_realonly_v1';
+let memsRealOnly = loadJSON(MEMS_REALONLY_KEY, false);
+function saveMemsRealOnly() { saveJSON(MEMS_REALONLY_KEY, memsRealOnly); }
+
 let pendingMemsConsumo  = null; // consumo real import (Cobertura Excel)
 let pendingMemsForecast = null; // forecast import (Cobertura Excel)
+let pendingMemsTransito = null; // itens em trânsito (planilha de follow-up de compras)
+let pendingMemsBom      = null; // estrutura de produtos (planilha de consumo por produto)
 // Estoque de materiais é atualizado junto com PA/SA pelo card "Importar estoque" (pendingStock).
 
-function saveMemsItems() { localStorage.setItem(MEMS_KEY, JSON.stringify(memsItems)); }
+// Estrutura de produtos: lista de relações {code, parent, final, qty, unit} —
+// qty = unidades do componente consumidas por 1 unidade do próximo uso (parent)
+let memsBom = loadJSON(MEMS_BOM_KEY, []);
+function saveMemsBom() { saveJSON(MEMS_BOM_KEY, memsBom); }
+// Estoque dos nós da estrutura que não são materiais nem PA (ex: PIs), capturado no import de estoque
+let memsBomStock = loadJSON(MEMS_BOM_STOCK_KEY, {});
+function saveMemsBomStock() { saveJSON(MEMS_BOM_STOCK_KEY, memsBomStock); }
+
+function saveMemsItems() { saveJSON(MEMS_KEY, memsItems); }
+
+// Consumo mensal (últimos 6 meses) a partir do histórico importado da planilha bruta do Dynamics
+function memsGetMonthlyConsumo(item) {
+  const ch = item.consumoHistory || {};
+  return getLast6Keys().map(k => ch[k] || 0);
+}
+// Espera um MATERIAL (item.consumoHistory) — para PRODUTO ACABADO (PA) use
+// avgConsumption(p), que lê p.salesHistory. Usada só na importação de consumo pra
+// popular item.avgConsumption; o resto do código lê o campo já calculado, não esta
+// função diretamente — se for usar em cálculo novo, prefira item.avgConsumption.
+function memsAvgConsumption(item) {
+  const ms = memsGetMonthlyConsumo(item);
+  return ms.reduce((a, b) => a + b, 0) / ms.length;
+}
+
+// Forecast mensal (6 meses PRA FRENTE) a partir da planilha de forecast cascateada
+// pela Estrutura (mesmas colunas Cód. Produto / Cód. Próximo Uso / Uso, com a
+// quantidade prevista de cada "próximo uso" já multiplicada pelo Uso de cada linha).
+function memsGetMonthlyForecast(item) {
+  const fh = item.forecastHistory || {};
+  return getNext6Keys().map(k => fh[k] || 0);
+}
+function memsAvgForecast(item) {
+  const ms = memsGetMonthlyForecast(item);
+  return ms.reduce((a, b) => a + b, 0) / ms.length;
+}
+// Pior caso = maior entre o consumo real médio e a média do forecast — calculado
+// aqui, não importado de planilha (decisão do usuário: mais transparente/auditável
+// do que confiar num número pronto de fora).
+function memsForecastWorstCase(item) {
+  return Math.max(item.avgConsumption || 0, item.avgForecast || 0);
+}
+// Consumo "efetivo" usado em toda conta de cobertura/alerta de materiais. Por
+// padrão é o pior caso (forecast x real); com o toggle memsRealOnly ligado, ignora
+// o forecast e usa só o consumo real medido — ver o campo "Considerar só consumo
+// real" na barra de filtros do Controle de Matérias.
+function memsEffectiveConsumption(item) {
+  return memsRealOnly ? (item.avgConsumption || 0) : memsForecastWorstCase(item);
+}
+
+/* ── Estrutura de produtos (cobertura em cadeia) ──────────────────────────
+   Cada relação da estrutura diz: `code` é consumido por `parent` na proporção
+   `qty` (unidades de code por 1 unidade de parent). O estoque dos níveis
+   seguintes (PI/SA/PA) "embute" unidades do material que ainda não precisam
+   ser repostas — a cobertura em cadeia soma esse equivalente ao estoque próprio.
+
+   DECISÕES DE NEGÓCIO (histórico — não reverter sem reler o porquê):
+
+   1. Cobertura em cadeia = (estoque próprio + soma de TODO o estoque embutido em
+      TODOS os ramos) ÷ consumo histórico da PRÓPRIA MP — não pelo consumo de cada
+      PA. Já testamos dividir pelo consumo do PA (achando que seria mais preciso
+      por ramo), mas o usuário pediu para reverter: a mesma MP é consumida por
+      vários PAs, e o consumo histórico da MP já reflete a demanda agregada real
+      de todos eles — não precisa reconstruir isso por fator de uso, que depende
+      da precisão da planilha de Estrutura.
+
+   2. Consequência do item 1: a soma agregada pode "esconder" um ramo específico
+      zerado atrás de outros ramos bem servidos. Por isso existe memsDryBranches:
+      cada ramo é avaliado sozinho (estoque próprio + estoque do caminho daquele
+      ramo, dividido pelo consumo do PA daquele ramo) e força status Crítico
+      quando um produto com vendas fica sem atendimento — independente do que a
+      soma agregada diga. Isso só roda quando a MP alimenta 2+ produtos finais
+      (com 1 só, a soma agregada já É aquele ramo, nada pra esconder).
+
+   3. Antes de confirmar um ramo em risco, checamos se já existe compra em
+      trânsito para a MP e se a previsão de chegada é ANTES da ruptura daquele
+      ramo (memsNextArrival vs. data de ruptura projetada). Se chega a tempo,
+      não é crítico — já está coberto por uma compra em andamento.
+
+   4. "Compra pendente" (memsNeedsReorder) compara a cobertura em cadeia (item 1)
+      com o lead time da MP — não com o estoque físico isolado. Cobertura ≤ lead
+      time = pedindo hoje, chegaria em cima da hora ou atrasado.
+*/
+function memsBomParents(code) {
+  const upper = String(code).toUpperCase();
+  const seen = {};
+  memsBom.forEach(e => {
+    if (String(e.code).toUpperCase() !== upper) return;
+    const p = String(e.parent).toUpperCase();
+    if (!seen[p]) seen[p] = { parent: p, qty: e.qty || 1 };
+  });
+  return Object.values(seen);
+}
+function memsHasParents(code) {
+  const upper = String(code).toUpperCase();
+  return memsBom.some(e => String(e.code).toUpperCase() === upper);
+}
+// Estoque de um nó da estrutura, onde quer que ele viva: materiais (memsItems),
+// SA (estoque secundário do PA), PA (painel de indicadores) ou capturado no import (PIs)
+function memsNodeStock(code) {
+  const upper = String(code).toUpperCase();
+  const mat = memsItems.find(i => i.code.toUpperCase() === upper);
+  if (mat) return mat.stock || 0;
+  const paFromSA = SA_REVERSE_MAP[upper];
+  if (paFromSA) return state.getByCode(paFromSA)?.stockSA || 0;
+  const pa = state.getByCode(upper);
+  if (pa) return pa.stock || 0;
+  return memsBomStock[upper] || 0;
+}
+// Mapa nó → fator (unidades do item embutidas em 1 unidade do nó), subindo a cadeia toda.
+// Caminhos convergentes somam fatores; guarda anti-ciclo por limite de iterações.
+function memsDownstreamFactors(code) {
+  const factors = {};
+  const queue = memsBomParents(code).map(p => ({ node: p.parent, factor: p.qty }));
+  let guard = 0;
+  while (queue.length && guard++ < 5000) {
+    const { node, factor } = queue.shift();
+    factors[node] = (factors[node] || 0) + factor;
+    memsBomParents(node).forEach(p => queue.push({ node: p.parent, factor: factor * p.qty }));
+  }
+  return factors;
+}
+// Unidades do item já embutidas nos estoques dos níveis seguintes: soma o estoque de
+// TODOS os nós da cadeia (todos os ramos), cada um convertido pela quantidade de uso
+// acumulada até esse nó. Por opção do usuário, essa soma é dividida pelo consumo
+// histórico da própria MP (não pelo consumo de cada PA) — a MP é consumida por mais
+// de um produto final, e o consumo dela já reflete a demanda agregada de todos eles.
+function memsEmbeddedStock(item) {
+  if (!memsBom.length) return 0;
+  const factors = memsDownstreamFactors(item.code);
+  let total = 0;
+  for (const [node, factor] of Object.entries(factors)) total += memsNodeStock(node) * factor;
+  return total;
+}
+// Caminha da item até o produto final `f`, acumulando o fator de uso e o estoque
+// (já convertido em unidades do item) de cada nó do caminho. Usado pela análise de
+// ramo em risco (memsDryBranches) para avaliar cada ramo individualmente — a soma
+// agregada acima não pega quando UM ramo específico fica sem atendimento.
+function memsWalkBranch(item, f, parents) {
+  let node = item.code.toUpperCase(), factor = 1, pathStock = 0, guard = 0;
+  while (guard++ < 30) {
+    const edge = parents.get(node);
+    if (!edge || edge.parent === '-') break;
+    factor *= edge.qty || 1;
+    pathStock += memsNodeStock(edge.parent) * factor;
+    if (edge.parent === f) break;
+    node = edge.parent;
+  }
+  return { factor, pathStock };
+}
+// Estoque efetivo = próprio + embutido na cadeia (soma de todos os ramos)
+function memsEffectiveStock(item) {
+  return (item.stock || 0) + memsEmbeddedStock(item);
+}
+
+/* ── Ramos em risco ───────────────────────────────────────────────────────
+   Cada ramo (item → … → produto final) é avaliado sozinho, não pela soma
+   agregada da cadeia: um ramo pode estar em risco mesmo que outro ramo do
+   mesmo material esteja bem servido (os estoques não se emprestam entre si).
+   Para o ramo, calculamos: estoque próprio do item + o que já está pronto
+   nos nós do caminho (convertido pela quantidade de uso acumulada), dividido
+   pelo consumo daquele produto final específico (não o consumo do item).
+   "Seco" = já zerado. "Em risco" = zerado OU não dá pra durar até o lead
+   time da reposição do material — mesmo estoque baixo, mas não zero. */
+let _bomIdx = null; // índices derivados de memsBom; invalidado quando a estrutura muda
+function memsBomIndex() {
+  if (_bomIdx) return _bomIdx;
+  const byFinal = new Map();      // final -> Map(código -> {parent, qty})
+  const finalsByCode = new Map(); // código -> Set(produtos finais que o consomem)
+  memsBom.forEach(e => {
+    const code = String(e.code).toUpperCase(), parent = String(e.parent).toUpperCase(), final = String(e.final || '').toUpperCase();
+    if (!final) return;
+    if (!byFinal.has(final)) byFinal.set(final, new Map());
+    byFinal.get(final).set(code, { parent, qty: e.qty || 1 });
+    if (!finalsByCode.has(code)) finalsByCode.set(code, new Set());
+    finalsByCode.get(code).add(final);
+  });
+  _bomIdx = { byFinal, finalsByCode };
+  return _bomIdx;
+}
+// Detalhe cru de cada ramo (produto final que consome o item) — usado tanto pelo
+// alerta de Compra pendente (memsDryBranches) quanto pelo de Antecipação
+// (memsAnticipationBranches). Com 1 só produto final não há o que "esconder" atrás
+// da soma agregada, então retorna vazio (mesma regra dos dois alertas).
+function memsAllBranchDetails(item) {
+  if (!memsBom.length) return [];
+  const { byFinal, finalsByCode } = memsBomIndex();
+  const finals = finalsByCode.get(item.code.toUpperCase());
+  if (!finals || finals.size <= 1) return [];
+  return [...finals].map(f => {
+    const parents = byFinal.get(f);
+    const { factor, pathStock } = memsWalkBranch(item, f, parents);
+    const available = (item.stock || 0) + pathStock;
+    const pa = state.getByCode(f);
+    const hasSales = !!pa && avgConsumption(pa) > 0;
+    const branchConsumption = pa ? avgConsumption(pa) * factor : 0; // consumo desse PA, em unidades do item
+    const monthsLeft = branchConsumption > 0 ? available / branchConsumption : Infinity;
+    return { final: f, available, hasSales, branchConsumption, monthsLeft, dry: available === 0 };
+  });
+}
+function memsDryBranches(item) {
+  const branches = memsAllBranchDetails(item);
+  if (!branches.length) return [];
+  const nextArrival = memsNextArrival(item); // já tem compra em trânsito? quando chega?
+  const out = [];
+  for (const b of branches) {
+    // Sem lead time cadastrado não dá pra avaliar "insuficiente antes da reposição" —
+    // nesse caso só sinalizamos o caso extremo (zerado), pra não inventar urgência sem base.
+    let atRisk = b.dry || (item.leadTime ? b.monthsLeft < item.leadTime : false);
+    // Antes de confirmar o risco, checa se já existe compra em trânsito e se ela chega
+    // a tempo: se a previsão de chegada for antes (ou no mesmo dia) da ruptura desse
+    // ramo, o material já está coberto e não é crítico.
+    if (atRisk && nextArrival && Number.isFinite(b.monthsLeft)) {
+      const ruptureDate = new Date(Date.now() + b.monthsLeft * 30.44 * 86400000);
+      if (nextArrival <= ruptureDate) atRisk = false;
+    }
+    if (!atRisk) continue;
+    out.push({ final: b.final, hasSales: b.hasSales, dry: b.dry, monthsLeft: Number.isFinite(b.monthsLeft) ? b.monthsLeft : null });
+  }
+  return out;
+}
+function memsDrySalesBranches(item) { return memsDryBranches(item).filter(b => b.hasSales); }
+// Necessário antecipação por ramo: mesmo quando o item não está em Compra pendente
+// (a cobertura agregada cobre o lead time numa compra nova), um ramo específico pode
+// esgotar antes do embarque JÁ EM TRÂNSITO chegar — o mesmo problema de "soma
+// agregada esconde o ramo ruim" que já resolvemos pra Compra pendente, só que aqui
+// comparando contra a data de chegada em vez do lead time.
+function memsAnticipationBranches(item) {
+  if (memsNeedsReorder(item)) return []; // já é compra pendente, não duplica alerta
+  const branches = memsAllBranchDetails(item);
+  if (!branches.length) return [];
+  const nextArrival = memsNextArrival(item);
+  if (!nextArrival) return [];
+  const out = [];
+  for (const b of branches) {
+    if (b.branchConsumption <= 0 || !Number.isFinite(b.monthsLeft)) continue; // sem venda medida, sem sinal confiável
+    const stockoutDate = new Date(Date.now() + b.monthsLeft * 30.44 * 86400000);
+    if (stockoutDate < nextArrival) out.push({ final: b.final, hasSales: b.hasSales, monthsLeft: b.monthsLeft });
+  }
+  return out;
+}
+function memsAnticipationSalesBranches(item) { return memsAnticipationBranches(item).filter(b => b.hasSales); }
 
 function memsStatus(item) {
-  const stock = (item.stock||0), cons = (item.avgConsumption||0);
+  // Ramo em risco (zerado, ou insuficiente até a reposição do material) com vendas
+  // → Crítico, independente do que a soma agregada da cadeia diga
+  if (memsDrySalesBranches(item).length) return STATUS.CRIT;
+  const stock = (item.stock||0), cons = memsEffectiveConsumption(item);
   if (stock === 0 && cons === 0) return STATUS.NOGIRO;
   if (cons === 0) return STATUS.EXCESS;
-  const cov = stock / cons;
+  const cov = memsCoverage(item);
   if (cov > 12) return STATUS.EXCESS;
   if (cov >= 6)  return STATUS.HIGH;
   if (cov >= 2)  return STATUS.OK;
   if (cov >= 1)  return STATUS.WARN;
   return STATUS.CRIT;
 }
+// Cobertura única: em cadeia quando o item é consumido por algum produto,
+// senão baseada só no consumo próprio. O consumo usado é o "efetivo" (pior caso
+// forecast x real, ou só real com o toggle memsRealOnly ligado).
 function memsCoverage(item) {
-  const cons = item.avgConsumption || 0;
+  const cons = memsEffectiveConsumption(item);
+  if (cons === 0) return Infinity;
+  return memsEffectiveStock(item) / cons;
+}
+// Cobertura própria: só o estoque físico do item, sem a cadeia — responde
+// "a produção consegue rodar amanhã?", enquanto a cadeia responde "preciso comprar?"
+function memsOwnCoverage(item) {
+  const cons = memsEffectiveConsumption(item);
   if (cons === 0) return Infinity;
   return (item.stock || 0) / cons;
 }
+// Cobertura Pior Caso: SEMPRE usa o pior caso (forecast x real), independente do
+// toggle memsRealOnly — é a referência conservadora permanente; por isso a coluna
+// fica escondida (não o cálculo) quando o toggle "só consumo real" está ligado.
 function memsWorstCoverage(item) {
-  const wc = item.worstCase || 0;
+  const wc = memsForecastWorstCase(item);
   if (wc === 0) return Infinity;
-  return (item.stock || 0) / wc;
+  return memsEffectiveStock(item) / wc;
 }
-// null quando não há ponto de ressuprimento importado ainda
-function memsReorderPct(item) {
-  const rp = item.reorderPoint || 0;
-  if (rp === 0) return null;
-  return (item.stock || 0) / rp;
+// % do lead time coberto pelo estoque efetivo + o que já está em trânsito (se houver) —
+// null quando não há lead time cadastrado
+function memsLeadCoveragePct(item) {
+  if (!item.leadTime) return null;
+  const cons = memsEffectiveConsumption(item);
+  if (cons <= 0) return Infinity;
+  const effectiveStock = memsEffectiveStock(item) + (item.inTransit || 0);
+  return (effectiveStock / cons) / item.leadTime;
 }
+// Compra pendente:
+//  (1) sem compra em trânsito — pedindo hoje, chegaria bem em cima da hora ou já atrasado
+//      (cobertura do estoque atual <= lead time)
+//  (2) com compra em trânsito — mesmo somando estoque + trânsito, não dá pra durar o lead time todo
+//      (cobertura combinada < lead time)
 function memsNeedsReorder(item) {
-  const pct = memsReorderPct(item);
-  return pct != null && pct < 1;
+  const pct = memsLeadCoveragePct(item);
+  if (pct == null) return false;
+  const hasTransit = (item.inTransit || 0) > 0;
+  return hasTransit ? pct < 1 : pct <= 1;
 }
 function memsPurchaseQueue() {
-  return memsItems.filter(memsNeedsReorder).sort((a,b) => memsReorderPct(a) - memsReorderPct(b));
+  return memsItems.filter(memsNeedsReorder).sort((a,b) => memsLeadCoveragePct(a) - memsLeadCoveragePct(b));
 }
-// Estoque projetado ao fim do lead time, assumindo consumo médio constante
-function memsProjectedStock(item) {
-  return (item.stock || 0) - (item.avgConsumption || 0) * (item.leadTime || 0);
+// Data prevista de ruptura de estoque (efetivo, incluindo cadeia), assumindo consumo constante
+function memsStockoutDate(item) {
+  const cons = memsEffectiveConsumption(item);
+  if (cons <= 0) return null;
+  const monthsLeft = memsEffectiveStock(item) / cons;
+  return new Date(Date.now() + monthsLeft * 30.44 * 86400000);
 }
-// Item ainda não bateu no ponto de ressuprimento, mas vai bater antes do lead time — pedir agora
+// Data do primeiro recebimento entre os embarques em trânsito do material.
+// arrivalDate vira string ISO depois do JSON.stringify/parse do localStorage,
+// então aceitamos tanto Date quanto string.
+function memsNextArrival(item) {
+  const dates = (item.transitEntries || [])
+    .map(e => e.arrivalDate ? new Date(e.arrivalDate) : null)
+    .filter(d => d instanceof Date && !isNaN(d));
+  return dates.length ? new Date(Math.min(...dates.map(d => d.getTime()))) : null;
+}
+// Necessário antecipação: vai acabar antes do primeiro recebimento já em trânsito
+// (só faz sentido para itens que ainda não estão na fila de compra pendente)
 function memsNeedsAnticipation(item) {
   if (memsNeedsReorder(item)) return false;
-  const rp = item.reorderPoint || 0;
-  if (!rp || !item.leadTime || !item.avgConsumption) return false;
-  return memsProjectedStock(item) < rp;
+  if (memsAnticipationSalesBranches(item).length) return true;
+  const arrival  = memsNextArrival(item);
+  const stockout = memsStockoutDate(item);
+  if (!arrival || !stockout) return false;
+  return stockout < arrival;
 }
 function memsAnticipationQueue() {
-  return memsItems.filter(memsNeedsAnticipation).sort((a,b) => memsProjectedStock(a) - memsProjectedStock(b));
-}
-function memsMonthsToReorder(item) {
-  const cons = item.avgConsumption || 0;
-  if (cons === 0) return Infinity;
-  return Math.max(0, ((item.stock||0) - (item.reorderPoint||0)) / cons);
+  return memsItems.filter(memsNeedsAnticipation).sort((a,b) => memsStockoutDate(a) - memsStockoutDate(b));
 }
 function fmtMemsTs(iso) {
   if (!iso) return null;
   return new Date(iso).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 function exportMemsCSV(items) {
-  const header = ['Código','Descrição','Tipo','Família','Fornecedor','Origem','Lead Time (meses)','Estoque','Consumo Médio/mês','Pior Caso/mês','Em Trânsito','Ponto de Ressuprimento','Cobertura (m)','Cobertura Pior Caso (m)','Status'];
+  const header = ['Código','Descrição','Tipo','Família','Fornecedor','Origem','Lead Time (meses)','Estoque','Consumo Médio/mês','Média Forecast/mês','Pior Caso/mês','Em Trânsito','Cobertura (m)','Cobertura própria (m)','Cobertura Pior Caso (m)','Status'];
   const rows = items.map(i => {
-    const cov = memsCoverage(i), covW = memsWorstCoverage(i);
+    const cov = memsCoverage(i), covOwn = memsOwnCoverage(i), covW = memsWorstCoverage(i);
     return [
       i.code, `"${i.desc}"`, i.type||'', `"${i.family||''}"`, `"${i.supplier||''}"`, i.origin||'',
-      i.leadTime ?? '', i.stock||0, i.avgConsumption||0, i.worstCase||0, i.inTransit||0, i.reorderPoint||0,
-      Number.isFinite(cov) ? cov.toFixed(1) : '', Number.isFinite(covW) ? covW.toFixed(1) : '',
+      i.leadTime ?? '', i.stock||0, i.avgConsumption||0, i.avgForecast||0, memsForecastWorstCase(i), i.inTransit||0,
+      Number.isFinite(cov) ? cov.toFixed(1) : '', Number.isFinite(covOwn) ? covOwn.toFixed(1) : '', Number.isFinite(covW) ? covW.toFixed(1) : '',
       STATUS_META[memsStatus(i)].label,
     ].join(',');
   });
@@ -1723,11 +2151,15 @@ function exportMemsCSV(items) {
 }
 
 function renderMems() {
+  // Com "só consumo real" ligado, forecast e pior caso somem da tela (a cobertura
+  // já ignora o forecast no cálculo — ver memsEffectiveConsumption/memsCoverage).
+  const vis = k => memsVisibleCols.has(k) && !(memsRealOnly && k === 'forecast');
   const filtered = memsItems.filter(item => {
     if (memsFilters.type     && item.type !== memsFilters.type)          return false;
     if (memsFilters.family   && item.family !== memsFilters.family)      return false;
     if (memsFilters.supplier && item.supplier !== memsFilters.supplier)  return false;
     if (memsFilters.status   && memsStatus(item) !== memsFilters.status) return false;
+    if (memsFilters.hideNoGiro && memsStatus(item) === STATUS.NOGIRO)     return false;
     if (memsFilters.search) {
       const q = memsFilters.search.toLowerCase();
       return item.code.toLowerCase().includes(q)
@@ -1737,7 +2169,7 @@ function renderMems() {
     }
     return true;
   }).sort((a, b) => {
-    const pa = memsReorderPct(a), pb = memsReorderPct(b);
+    const pa = memsLeadCoveragePct(a), pb = memsLeadCoveragePct(b);
     if (pa != null && pb != null) return pa - pb;
     if (pa != null) return -1;
     if (pb != null) return 1;
@@ -1751,8 +2183,9 @@ function renderMems() {
   const hasCat   = memsItems.length > 0;
   const queue    = memsPurchaseQueue();
   const anticipation = memsAnticipationQueue();
+  const typeItems = memsFilters.type ? memsItems.filter(i => i.type === memsFilters.type) : memsItems;
   const families  = [...new Set(memsItems.map(i => i.family).filter(Boolean))].sort();
-  const suppliers = [...new Set(memsItems.map(i => i.supplier).filter(Boolean))].sort();
+  const suppliers = [...new Set(typeItems.map(i => i.supplier).filter(Boolean))].sort();
   const lastStock    = fmtMemsTs(memsMeta.stockUpdatedAt);
   const lastConsumo  = fmtMemsTs(memsMeta.consumoUpdatedAt);
   const lastForecast = fmtMemsTs(memsMeta.forecastUpdatedAt);
@@ -1780,40 +2213,14 @@ function renderMems() {
 
       <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
         <div class="kpi" style="${queue.length>0?'border-color:var(--danger-text)':''}">
-          <div class="kpi-label">🛒 Precisam de compra</div>
+          <div class="kpi-label clickable-cell" onclick="openMemsAlertModal('purchase')" title="Ver relatório detalhado">🛒 Compra pendente</div>
           <div class="kpi-value ${queue.length>0?'text-danger':''}">${queue.length}</div>
         </div>
         <div class="kpi" style="${anticipation.length>0?'border-color:var(--warn-text)':''}">
-          <div class="kpi-label">⏳ Necessário antecipação</div>
+          <div class="kpi-label clickable-cell" onclick="openMemsAlertModal('anticipation')" title="Ver relatório detalhado">⏳ Necessário antecipação</div>
           <div class="kpi-value ${anticipation.length>0?'text-warn':''}">${anticipation.length}</div>
         </div>
       </div>
-
-      ${hasCat && queue.length ? `
-        <div class="alert-crit">
-          <div class="alert-crit-hd">
-            <i class="ti ti-alert-triangle"></i> Fila de compra — ${queue.length} ${queue.length===1?'item':'itens'} abaixo do ponto de ressuprimento
-            <span class="alert-crit-sub">ordenado por urgência</span>
-          </div>
-          <div class="alert-crit-chips">
-            ${queue.slice(0,10).map(i => `<span class="crit-chip"><strong>${i.code}</strong><span class="crit-chip-desc">${Math.round(memsReorderPct(i)*100)}%</span></span>`).join('')}
-            ${queue.length>10 ? `<span class="crit-more">+${queue.length-10}</span>` : ''}
-          </div>
-        </div>
-      ` : ''}
-
-      ${hasCat && anticipation.length ? `
-        <div class="alert-crit" style="background:var(--warn-bg);border-color:var(--warn-text)">
-          <div class="alert-crit-hd" style="color:var(--warn-text)">
-            <i class="ti ti-clock-exclamation"></i> Antecipação necessária — ${anticipation.length} ${anticipation.length===1?'item':'itens'} vão bater no ponto de ressuprimento antes do lead time chegar
-            <span class="alert-crit-sub">ordenado por urgência</span>
-          </div>
-          <div class="alert-crit-chips">
-            ${anticipation.slice(0,10).map(i => `<span class="crit-chip" style="border-color:var(--warn-text)"><strong style="color:var(--warn-text)">${i.code}</strong><span class="crit-chip-desc">faltam ${memsMonthsToReorder(i).toFixed(1)}m</span></span>`).join('')}
-            ${anticipation.length>10 ? `<span class="crit-more">+${anticipation.length-10}</span>` : ''}
-          </div>
-        </div>
-      ` : ''}
 
       ${!hasCat ? `
         <div class="tbl-wrap"><div class="empty" style="padding:3rem 2rem">
@@ -1844,55 +2251,90 @@ function renderMems() {
           <option value="">Todos os status</option>
           ${Object.entries(STATUS_META).map(([k,v])=>`<option value="${k}" ${memsFilters.status===k?'selected':''}>${v.dot} ${v.label}</option>`).join('')}
         </select>
+        <div class="col-picker">
+          <button class="btn btn-ghost" id="mems-cols-btn" title="Escolher colunas visíveis"><i class="ti ti-columns"></i> Colunas</button>
+          ${memsColsOpen ? `
+          <div class="col-picker-menu" id="mems-cols-menu">
+            <label class="col-picker-all"><input type="checkbox" id="mems-cols-all" ${memsVisibleCols.size === MEMS_COLUMNS.length ? 'checked' : ''}> <strong>Todas</strong></label>
+            ${MEMS_COLUMNS.map(c => `<label><input type="checkbox" data-colkey="${c.key}" ${memsVisibleCols.has(c.key) ? 'checked' : ''}> ${c.label}</label>`).join('')}
+          </div>` : ''}
+        </div>
+        <label class="filter-toggle" title="Ignora o forecast: cobertura, alertas e status passam a usar só o consumo real medido">
+          <input type="checkbox" id="mems-realonly" ${memsRealOnly ? 'checked' : ''}>
+          Desconsiderar Forecast
+        </label>
+        <label class="filter-toggle" title="Esconde itens sem estoque e sem consumo/forecast — sem giro nenhum">
+          <input type="checkbox" id="mems-hide-nogiro" ${memsFilters.hideNoGiro ? 'checked' : ''}>
+          Ocultar sem giro
+        </label>
         <span class="filter-results">${filtered.length} / ${memsItems.length} itens</span>
       </div>
       <div class="tbl-wrap">
         <table>
           <thead><tr>
             <th>Código</th>
-            <th>Descrição</th>
-            <th class="num-c">Tipo</th>
-            <th>Família</th>
-            <th>Fornecedor</th>
-            <th>Origem</th>
-            <th class="num-c">Lead Time</th>
-            <th class="num-c">Estoque</th>
-            <th class="num-c">Consumo Médio</th>
-            <th class="num-c">Em Trânsito</th>
-            <th class="num-c">Cobertura</th>
-            <th class="num-c">Cob. Pior Caso</th>
-            <th class="num-c">Status</th>
+            ${vis('desc')       ? '<th>Descrição</th>' : ''}
+            ${vis('tipo')       ? '<th class="num-c">Tipo</th>' : ''}
+            ${vis('familia')    ? '<th>Família</th>' : ''}
+            ${vis('fornecedor') ? '<th>Fornecedor</th>' : ''}
+            ${vis('origem')     ? '<th>Origem</th>' : ''}
+            ${vis('leadtime')   ? '<th class="num-c">Lead Time</th>' : ''}
+            ${vis('estoque')    ? '<th class="num-c">Estoque</th>' : ''}
+            ${vis('consumo')    ? '<th class="num-c">Consumo Médio</th>' : ''}
+            ${vis('forecast')   ? '<th class="num-c">Média Forecast</th>' : ''}
+            ${vis('transito')   ? '<th class="num-c">Em Trânsito</th>' : ''}
+            ${vis('cobertura')  ? '<th class="num-c">Cobertura</th>' : ''}
+            ${vis('cobpropria') ? '<th class="num-c">Cobertura própria</th>' : ''}
+            ${vis('status')     ? '<th class="num-c">Status</th>' : ''}
           </tr></thead>
           <tbody>
-            ${filtered.length === 0 ? `<tr><td colspan="13" class="empty">Nenhum item encontrado.</td></tr>` :
+            ${filtered.length === 0 ? `<tr><td colspan="${1 + MEMS_COLUMNS.filter(c => vis(c.key)).length}" class="empty">Nenhum item encontrado.</td></tr>` :
               filtered.map(item => {
                 const cov  = memsCoverage(item);
-                const covW = memsWorstCoverage(item);
                 const st   = memsStatus(item);
+                const covOwn   = memsOwnCoverage(item);
                 const covText  = !Number.isFinite(cov)  ? '—' : cov.toFixed(1) + ' m';
-                const covWText = !Number.isFinite(covW) ? '—' : covW.toFixed(1) + ' m';
+                const covOwnText = !Number.isFinite(covOwn) ? '—' : covOwn.toFixed(1) + ' m';
                 const covPct   = Math.min(100, Number.isFinite(cov) ? cov/12*100 : 100);
                 const needsReorder = memsNeedsReorder(item);
+                const covChain = memsHasParents(item.code);
+                const dryBranches = memsDrySalesBranches(item);
                 return `<tr>
                   <td><span style="font-size:12px;font-weight:500;color:var(--muted)">${item.code}</span></td>
-                  <td class="td-desc"><div title="${item.desc}">${item.desc}</div></td>
-                  <td class="num-c"><span class="badge" style="background:var(--accent-bg);color:var(--accent)">${item.type||'—'}</span></td>
-                  <td style="font-size:12px;color:var(--muted)">${item.family||'—'}</td>
-                  <td style="font-size:12px">${item.supplier||'—'}</td>
-                  <td style="font-size:12px;color:var(--muted)">${item.origin||'—'}</td>
-                  <td class="num-c" style="font-size:12px">${item.leadTime != null ? item.leadTime + ' m' : '—'}</td>
-                  <td class="num-c" style="font-weight:500">${(item.stock||0).toLocaleString('pt-BR')}</td>
-                  <td class="num-c" style="color:var(--muted);font-size:12px">${(item.avgConsumption||0) > 0 ? (item.avgConsumption).toLocaleString('pt-BR',{maximumFractionDigits:1})+' /mês' : '—'}</td>
-                  <td class="num-c" style="font-size:12px;color:var(--hint)">${(item.inTransit||0) > 0 ? (item.inTransit).toLocaleString('pt-BR') : '—'}</td>
-                  <td class="num-c">
-                    <span style="font-size:13px;font-weight:500">${covText}</span>
+                  ${vis('desc') ? `<td class="td-desc"><div title="${item.desc}">${item.desc}</div></td>` : ''}
+                  ${vis('tipo') ? `<td class="num-c"><span class="badge" style="background:var(--accent-bg);color:var(--accent)">${item.type||'—'}</span></td>` : ''}
+                  ${vis('familia') ? `<td style="font-size:12px;color:var(--muted)">${item.family||'—'}</td>` : ''}
+                  ${vis('fornecedor') ? `<td style="font-size:12px">${item.supplier||'—'}</td>` : ''}
+                  ${vis('origem') ? `<td style="font-size:12px;color:var(--muted)">${item.origin||'—'}</td>` : ''}
+                  ${vis('leadtime') ? `<td class="num-c" style="font-size:12px">${item.leadTime != null ? item.leadTime + ' m' : '—'}</td>` : ''}
+                  ${vis('estoque') ? `<td class="num-c" style="font-weight:500">${(item.stock||0).toLocaleString('pt-BR')}</td>` : ''}
+                  ${vis('consumo') ? `<td class="num-c" style="color:var(--muted);font-size:12px">${(item.avgConsumption||0) > 0
+                    ? (Object.keys(item.consumoHistory||{}).length
+                        ? `<span class="clickable-cell" onclick="openMemsConsumoModal('${item.code}')" title="Ver histórico de consumo">${Math.ceil(item.avgConsumption).toLocaleString('pt-BR')} /mês</span>`
+                        : `${Math.ceil(item.avgConsumption).toLocaleString('pt-BR')} /mês`)
+                    : '—'}</td>` : ''}
+                  ${vis('forecast') ? `<td class="num-c" style="color:var(--muted);font-size:12px">${(item.avgForecast||0) > 0
+                    ? (Object.keys(item.forecastHistory||{}).length
+                        ? `<span class="clickable-cell" onclick="openMemsForecastModal('${item.code}')" title="Ver histórico de forecast">${Math.ceil(item.avgForecast).toLocaleString('pt-BR')} /mês</span>`
+                        : `${Math.ceil(item.avgForecast).toLocaleString('pt-BR')} /mês`)
+                    : '—'}</td>` : ''}
+                  ${vis('transito') ? `<td class="num-c" style="font-size:12px;color:var(--hint)">${(item.inTransit||0) > 0
+                    ? (item.transitEntries||[]).length
+                        ? `<span class="clickable-cell" onclick="openMemsTransitModal('${item.code}')" title="Ver embarques em trânsito">${(item.inTransit).toLocaleString('pt-BR')}</span>`
+                        : (item.inTransit).toLocaleString('pt-BR')
+                    : '—'}</td>` : ''}
+                  ${vis('cobertura') ? `<td class="num-c">
+                    ${covChain
+                      ? `<span class="clickable-cell" style="font-size:13px;font-weight:500" onclick="openMemsCoverageModal('${item.code}')" title="Cobertura em cadeia — ver estoques dos produtos que consomem este item">${covText}</span>`
+                      : `<span style="font-size:13px;font-weight:500">${covText}</span>`}
                     <div class="cov-bar"><div class="cov-fill" style="width:${covPct}%;background:${STATUS_META[st].hex}"></div></div>
-                  </td>
-                  <td class="num-c" style="font-size:12px;color:var(--muted)">${covWText}</td>
-                  <td class="num-c">
+                  </td>` : ''}
+                  ${vis('cobpropria') ? `<td class="num-c" style="font-size:12px;color:var(--muted)" title="Só o estoque físico do item, sem a cadeia">${covOwnText}</td>` : ''}
+                  ${vis('status') ? `<td class="num-c">
                     <span class="badge ${STATUS_META[st].cls}">${STATUS_META[st].label}</span>
-                    ${needsReorder ? `<span class="badge" style="background:var(--danger-bg);color:var(--danger-text);margin-left:4px" title="Estoque (${item.stock||0}) abaixo do ponto de ressuprimento (${item.reorderPoint})">🛒</span>` : ''}
-                  </td>
+                    ${needsReorder ? `<span class="badge" style="background:var(--danger-bg);color:var(--danger-text);margin-left:4px" title="Estoque acaba antes do lead time (${item.leadTime} m) de um novo pedido">🛒</span>` : ''}
+                    ${dryBranches.length ? `<span class="badge" style="background:var(--danger-bg);color:var(--danger-text);margin-left:4px;cursor:pointer" onclick="openMemsCoverageModal('${item.code}')" title="Ramo em risco de ruptura (não cobre até a reposição do material): ${dryBranches.map(b => b.dry ? b.final+' (imediata)' : b.final+' (~'+b.monthsLeft.toFixed(1)+'m)').join(', ')}">⚠️ ${dryBranches.length} ramo${dryBranches.length > 1 ? 's' : ''} em risco</span>` : ''}
+                  </td>` : ''}
                 </tr>`;
               }).join('')
             }
@@ -1908,18 +2350,43 @@ function renderMems() {
     clearTimeout(_mt); _mt = setTimeout(() => { memsFilters.search = e.target.value; renderMems(); }, 220);
   });
   document.querySelectorAll('[data-mtype]').forEach(btn => {
-    btn.addEventListener('click', () => { memsFilters.type = btn.dataset.mtype; renderMems(); });
+    btn.addEventListener('click', () => { memsFilters.type = btn.dataset.mtype; memsFilters.supplier = ''; renderMems(); });
   });
   document.getElementById('mems-family')?.addEventListener('change',   e => { memsFilters.family   = e.target.value; renderMems(); });
   document.getElementById('mems-supplier')?.addEventListener('change', e => { memsFilters.supplier = e.target.value; renderMems(); });
   document.getElementById('mems-status')?.addEventListener('change',   e => { memsFilters.status   = e.target.value; renderMems(); });
   document.getElementById('btn-mems-export')?.addEventListener('click', () => exportMemsCSV(filtered));
+
+  // Seletor de colunas
+  document.getElementById('mems-cols-btn')?.addEventListener('click', () => { memsColsOpen = !memsColsOpen; renderMems(); });
+  document.getElementById('mems-cols-all')?.addEventListener('change', e => {
+    memsVisibleCols = e.target.checked ? new Set(MEMS_COLUMNS.map(c => c.key)) : new Set();
+    saveMemsVisibleCols(); renderMems();
+  });
+  document.querySelectorAll('#mems-cols-menu [data-colkey]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) memsVisibleCols.add(cb.dataset.colkey);
+      else memsVisibleCols.delete(cb.dataset.colkey);
+      saveMemsVisibleCols(); renderMems();
+    });
+  });
+  document.getElementById('mems-realonly')?.addEventListener('change', e => {
+    memsRealOnly = e.target.checked;
+    saveMemsRealOnly();
+    renderMems();
+  });
+  document.getElementById('mems-hide-nogiro')?.addEventListener('change', e => {
+    memsFilters.hideNoGiro = e.target.checked;
+    renderMems();
+  });
 }
 
 // ── ATUALIZAR ESTOQUE — painel único com sub-abas de import ───────────────
 const MEMS_UPDATE_TABS = [
-  { key: 'consumo',  label: 'Consumo',  icon: 'ti-chart-line' },
-  { key: 'forecast', label: 'Forecast', icon: 'ti-trending-up' },
+  { key: 'consumo',   label: 'Consumo',   icon: 'ti-chart-line' },
+  { key: 'forecast',  label: 'Forecast',  icon: 'ti-trending-up' },
+  { key: 'transito',  label: 'Trânsito',  icon: 'ti-truck' },
+  { key: 'estrutura', label: 'Estrutura', icon: 'ti-sitemap' },
 ];
 let memsUpdateSubTab = 'consumo';
 
@@ -1927,7 +2394,7 @@ let memsUpdateSubTab = 'consumo';
 // Estoque é atualizado só pelo card "Importar estoque" (handleStockFile/applyStockImport), junto com PA/SA.
 // Cadastro de material novo é só via modal "Novo item" — sem import de planilha para isso.
 function resetMemsMaterialsSection() {
-  pendingMemsConsumo = null; pendingMemsForecast = null;
+  pendingMemsConsumo = null; pendingMemsForecast = null; pendingMemsTransito = null; pendingMemsBom = null;
   renderMemsMaterialsSection();
 }
 
@@ -1956,8 +2423,10 @@ function renderMemsMaterialsSection() {
     btn.addEventListener('click', () => { memsUpdateSubTab = btn.dataset.subtab; renderMemsMaterialsSection(); });
   });
   const body = document.getElementById('mems-update-body');
-  if (memsUpdateSubTab === 'forecast') renderMemsForecastBody(body);
-  else                                  renderMemsConsumoBody(body);
+  if      (memsUpdateSubTab === 'forecast')  renderMemsForecastBody(body);
+  else if (memsUpdateSubTab === 'transito')  renderMemsTransitoBody(body);
+  else if (memsUpdateSubTab === 'estrutura') renderMemsEstruturaBody(body);
+  else                                        renderMemsConsumoBody(body);
 }
 
 // ── CONSUMO & FORECAST (planilha de cobertura da PCP) ─────────────────────
@@ -2009,10 +2478,10 @@ function renderCoveragePreview(prevId, imported, filename) {
   `;
 }
 
-// ── CONSUMO (Média Real, Pior Caso, Ponto de Ressuprimento) ───────────────
+// ── CONSUMO (Média Real, Pior Caso) ───────────────────────────────────────
 function renderMemsConsumoBody(body) {
   body.innerHTML = `
-    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de cobertura de estoque da PCP. Lemos <strong>Média Real</strong>, <strong>Pior Caso</strong> e <strong>Ponto de Ressuprimento</strong> das abas MP / ME e MS, casando pelo código.</div>
+    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de cobertura da PCP (<strong>Média Real</strong>, <strong>Pior Caso</strong> nas abas MP / ME e MS) <strong>ou</strong> a planilha bruta de movimentação do Dynamics (colunas Número do item, Data física, Saída, Recebimento, Quantidade) — nesse caso calculamos a média dos últimos 6 meses automaticamente.</div>
     <div class="drop-zone" id="mems-consumo-drop">
       <i class="ti ti-cloud-upload" style="font-size:28px;color:var(--hint)"></i>
       <p style="margin:6px 0 2px;font-size:13px">Arraste o arquivo aqui ou clique para selecionar</p>
@@ -2035,43 +2504,386 @@ function renderMemsConsumoBody(body) {
 }
 
 async function handleMemsConsumoFile(file) {
+  showLoading('Lendo arquivo de consumo…');
   try {
-    const imported = await importCoverageFile(file, {
-      avgConsumption: ['média real','media real','real'],
-      worstCase:      ['pior'],
-      reorderPoint:   ['ressuprimento','reposição','reposicao'],
-    });
-    pendingMemsConsumo = { items: imported, filename: file.name };
-    renderCoveragePreview('mems-consumo-prev', imported, file.name);
-    toggleMemsUpdateApply(imported.length > 0, applyMemsConsumoImport);
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+    const requiredCols = [COL_SALES.code, COL_SALES.date, COL_SALES.exit, COL_SALES.qty];
+    // A planilha bruta do Dynamics às vezes vem com uma aba extra (ex: tabela dinâmica) antes
+    // da aba com os dados de verdade — por isso procuramos em todas as abas, não só na primeira.
+    let rawRows = null;
+    for (const sheetName of wb.SheetNames) {
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' });
+      if (rows.length && requiredCols.every(h => Object.keys(rows[0]).includes(h))) {
+        rawRows = rows;
+        break;
+      }
+    }
+
+    if (rawRows) {
+      const { consumoMap, skipped } = aggregateMemsConsumo(rawRows);
+      const codeSet = new Set(memsItems.map(i => i.code.toUpperCase()));
+      const items = Object.entries(consumoMap).filter(([code]) => codeSet.has(code));
+      const months = [...new Set(items.flatMap(([, mData]) => Object.keys(mData)))].sort();
+      pendingMemsConsumo = { items, months, filename: file.name, skipped, totalRows: rawRows.length, raw: true };
+      renderMemsConsumoRawPreview('mems-consumo-prev', pendingMemsConsumo);
+      toggleMemsUpdateApply(items.length > 0, applyMemsConsumoImport);
+    } else {
+      const imported = await importCoverageFile(file, {
+        avgConsumption: ['média real','media real','real'],
+      });
+      pendingMemsConsumo = { items: imported, filename: file.name, raw: false };
+      renderCoveragePreview('mems-consumo-prev', imported, file.name);
+      toggleMemsUpdateApply(imported.length > 0, applyMemsConsumoImport);
+    }
   } catch(err) {
     showToast('Erro ao ler arquivo: ' + err.message, 'err');
+  } finally {
+    hideLoading();
   }
+}
+
+function renderMemsConsumoRawPreview(prevId, pending) {
+  const prev = document.getElementById(prevId);
+  if (!prev) return;
+  const { items, months, filename, skipped, totalRows } = pending;
+  prev.innerHTML = items.length ? `
+    <div class="alert" style="background:var(--ok-bg);border-color:var(--ok-text);color:var(--ok-text)">
+      <i class="ti ti-check"></i>
+      <strong>${items.length} materiais</strong> com consumo calculado (${months.map(fmtMonthKey).join(', ')})
+      <span style="margin-left:auto;font-size:11px;color:var(--hint)">${filename} · ${totalRows} linhas · ${skipped} ignoradas</span>
+    </div>
+  ` : `
+    <div class="alert">
+      <i class="ti ti-alert-circle"></i> Nenhum código do cadastro de materiais foi encontrado nesse arquivo.
+    </div>
+  `;
 }
 
 function applyMemsConsumoImport() {
   if (!pendingMemsConsumo) return;
-  pendingMemsConsumo.items.forEach(item => {
-    const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
-    if (existing) {
-      existing.avgConsumption = item.avgConsumption;
-      existing.worstCase      = item.worstCase;
-      existing.reorderPoint   = item.reorderPoint;
+  showLoading('Atualizando consumo…');
+  setTimeout(() => {
+    if (pendingMemsConsumo.raw) {
+      pendingMemsConsumo.items.forEach(([code, monthData]) => {
+        const existing = memsItems.find(i => i.code.toUpperCase() === code);
+        if (!existing) return;
+        existing.consumoHistory = existing.consumoHistory || {};
+        Object.entries(monthData).forEach(([mk, qty]) => {
+          existing.consumoHistory[mk] = Math.max(0, Math.round(qty));
+        });
+        existing.avgConsumption = memsAvgConsumption(existing);
+      });
+    } else {
+      pendingMemsConsumo.items.forEach(item => {
+        const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
+        if (existing) existing.avgConsumption = item.avgConsumption;
+      });
     }
-  });
-  saveMemsItems();
-  memsMeta.consumoUpdatedAt = new Date().toISOString();
-  saveMemsMeta();
-  const n = pendingMemsConsumo.items.length;
-  resetMemsMaterialsSection();
-  showToast(`Consumo atualizado: ${n} itens`);
-  renderMems();
+    saveMemsItems();
+    memsMeta.consumoUpdatedAt = new Date().toISOString();
+    saveMemsMeta();
+    const n = pendingMemsConsumo.items.length;
+    resetMemsMaterialsSection();
+    hideLoading();
+    showToast(`Consumo atualizado: ${n} itens`);
+    renderMems();
+  }, 0);
 }
 
-// ── FORECAST (Média Forec.) ───────────────────────────────────────────────
+// ── TRÂNSITO (planilha de follow-up de compras / embarques) ───────────────
+// O relatório vem com linhas de título/timestamp antes da tabela de verdade, então
+// procuramos a linha que contém "Código do produto" para achar onde o cabeçalho começa.
+function parseTransitSheet(ws) {
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const headerRowIdx = rows.findIndex(r => r.some(c => String(c).trim() === 'Código do produto'));
+  if (headerRowIdx === -1) return [];
+  const header = rows[headerRowIdx].map(h => String(h).trim());
+  const iCode     = header.indexOf('Código do produto');
+  const iQty      = header.indexOf('QTDE');
+  const iEmbarque = header.indexOf('Embarque');
+  const iArrival  = header.indexOf('Prev. Chegada PO');
+  if (iCode === -1 || iQty === -1) return [];
+  const out = [];
+  for (let r = headerRowIdx + 1; r < rows.length; r++) {
+    const row  = rows[r];
+    const code = String(row[iCode] || '').trim().toUpperCase();
+    if (!code) continue;
+    const qty = toNum(row[iQty]);
+    if (!qty) continue;
+    out.push({
+      code,
+      qty,
+      embarque: iEmbarque !== -1 ? String(row[iEmbarque] || '').trim() : '',
+      arrivalDate: iArrival !== -1 ? toDate(row[iArrival]) : null,
+    });
+  }
+  return out;
+}
+
+function renderMemsTransitoBody(body) {
+  body.innerHTML = `
+    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de follow-up de compras (colunas Código do produto, QTDE, Embarque, Prev. Chegada PO). O total por material substitui o valor de "Em Trânsito" atual — materiais fora da planilha são zerados.</div>
+    <div class="drop-zone" id="mems-transito-drop">
+      <i class="ti ti-cloud-upload" style="font-size:28px;color:var(--hint)"></i>
+      <p style="margin:6px 0 2px;font-size:13px">Arraste o arquivo aqui ou clique para selecionar</p>
+      <p style="font-size:11px;color:var(--hint)">.xlsx</p>
+      <input type="file" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer" id="mems-transito-fi">
+    </div>
+    <div id="mems-transito-prev" style="margin-top:12px"></div>
+  `;
+  document.getElementById('mems-transito-fi')?.addEventListener('change', e => {
+    if (e.target.files[0]) handleMemsTransitoFile(e.target.files[0]);
+  });
+  const dz = document.getElementById('mems-transito-drop');
+  dz?.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+  dz?.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+  dz?.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) handleMemsTransitoFile(e.dataTransfer.files[0]);
+  });
+  toggleMemsUpdateApply(false);
+}
+
+// Diagnóstico pra quando a detecção de cabeçalho falha: mostra, por aba, a primeira
+// linha com algum conteúdo — ajuda a comparar rapidamente com as colunas esperadas
+// em vez de só "não encontramos nada" (já perdemos tempo com isso 3x nesta conversa).
+function memsFileHeaderPreview(wb) {
+  return wb.SheetNames.map(name => {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: '' });
+    const headerRow = rows.find(r => r.some(c => String(c).trim() !== '')) || [];
+    const headers = headerRow.map(c => String(c).trim()).filter(Boolean).slice(0, 12);
+    return `<strong>${name}</strong>: ${headers.length ? headers.join(', ') : '(aba vazia)'}`;
+  }).join('<br>');
+}
+
+async function handleMemsTransitoFile(file) {
+  showLoading('Lendo arquivo de trânsito…');
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+    let rows = [];
+    for (const sheetName of wb.SheetNames) {
+      rows = parseTransitSheet(wb.Sheets[sheetName]);
+      if (rows.length) break;
+    }
+    const codeSet = new Set(memsItems.map(i => i.code.toUpperCase()));
+    const map = {};
+    let ignored = 0;
+    rows.forEach(r => {
+      if (!codeSet.has(r.code)) { ignored++; return; }
+      if (!map[r.code]) map[r.code] = { qty: 0, entries: [] };
+      map[r.code].qty += r.qty;
+      map[r.code].entries.push({ embarque: r.embarque, qty: r.qty, arrivalDate: r.arrivalDate });
+    });
+    const items = Object.entries(map);
+    pendingMemsTransito = { items, filename: file.name, totalRows: rows.length, ignored,
+      headerPreview: rows.length ? '' : memsFileHeaderPreview(wb) };
+    renderMemsTransitoPreview('mems-transito-prev', pendingMemsTransito);
+    toggleMemsUpdateApply(items.length > 0, applyMemsTransitoImport);
+  } catch(err) {
+    showToast('Erro ao ler arquivo: ' + err.message, 'err');
+  } finally {
+    hideLoading();
+  }
+}
+
+function renderMemsTransitoPreview(prevId, pending) {
+  const prev = document.getElementById(prevId);
+  if (!prev) return;
+  const { items, filename, totalRows, ignored, headerPreview } = pending;
+  prev.innerHTML = items.length ? `
+    <div class="alert" style="background:var(--ok-bg);border-color:var(--ok-text);color:var(--ok-text)">
+      <i class="ti ti-check"></i>
+      <strong>${items.length} materiais</strong> com itens em trânsito
+      <span style="margin-left:auto;font-size:11px;color:var(--hint)">${filename} · ${totalRows} linhas · ${ignored} ignoradas</span>
+    </div>
+  ` : `
+    <div class="alert" style="align-items:flex-start">
+      <i class="ti ti-alert-circle"></i>
+      <div>
+        ${totalRows > 0
+          ? 'Nenhum código do cadastro de materiais foi encontrado nesse arquivo.'
+          : `Não encontramos as colunas esperadas (Código do produto, QTDE, Prev. Chegada PO). Colunas encontradas:<br><span style="font-size:11px;color:var(--hint)">${headerPreview || '—'}</span>`}
+      </div>
+    </div>
+  `;
+}
+
+function applyMemsTransitoImport() {
+  if (!pendingMemsTransito) return;
+  showLoading('Atualizando trânsito…');
+  setTimeout(() => {
+    memsItems.forEach(i => { i.inTransit = 0; i.transitEntries = []; });
+    pendingMemsTransito.items.forEach(([code, data]) => {
+      const existing = memsItems.find(i => i.code.toUpperCase() === code);
+      if (!existing) return;
+      existing.inTransit = Math.max(0, Math.round(data.qty));
+      existing.transitEntries = data.entries;
+    });
+    saveMemsItems();
+    memsMeta.transitoUpdatedAt = new Date().toISOString();
+    saveMemsMeta();
+    const n = pendingMemsTransito.items.length;
+    resetMemsMaterialsSection();
+    hideLoading();
+    showToast(`Trânsito atualizado: ${n} itens`);
+    renderMems();
+  }, 0);
+}
+
+// ── ESTRUTURA (consumo por produto: componente → próximo uso, com quantidades) ──
+// O cabeçalho pode não estar na primeira linha — procuramos a linha "Cód. Produto".
+function parseBomSheet(ws) {
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const headerRowIdx = rows.findIndex(r => r.some(c => String(c).trim() === 'Cód. Produto'));
+  if (headerRowIdx === -1) return [];
+  const header = rows[headerRowIdx].map(h => String(h).trim());
+  const iCode   = header.indexOf('Cód. Produto');
+  const iFinal  = header.indexOf('Cód. Final');
+  const iParent = header.indexOf('Cód. Próximo Uso');
+  const iQty    = header.indexOf('Uso');
+  const iUnit   = header.indexOf('Unidade');
+  if (iCode === -1 || iParent === -1) return [];
+  const out = [];
+  for (let r = headerRowIdx + 1; r < rows.length; r++) {
+    const row    = rows[r];
+    const code   = String(row[iCode] || '').trim().toUpperCase();
+    const parent = String(row[iParent] || '').trim().toUpperCase();
+    if (!code || !parent || parent === '-') continue; // raiz (o próprio PA) não gera relação
+    out.push({
+      code, parent,
+      final: iFinal !== -1 ? String(row[iFinal] || '').trim().toUpperCase() : '',
+      qty:   iQty !== -1 ? (toNum(row[iQty]) || 1) : 1,
+      unit:  iUnit !== -1 ? String(row[iUnit] || '').trim() : '',
+    });
+  }
+  return out;
+}
+
+function renderMemsEstruturaBody(body) {
+  const current = memsBom.length
+    ? `<div class="import-card-sub">Estrutura atual: <strong>${memsBom.length} relações</strong>${memsMeta.bomUpdatedAt ? ' · importada em ' + fmtMemsTs(memsMeta.bomUpdatedAt) : ''}</div>`
+    : '';
+  body.innerHTML = `
+    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de consumo por produto (colunas Cód. Produto, Cód. Final, Cód. Próximo Uso, Uso, Unidade). Com ela a cobertura passa a considerar o estoque dos produtos (PI/PA) que consomem cada material.</div>
+    ${current}
+    <div class="drop-zone" id="mems-bom-drop">
+      <i class="ti ti-cloud-upload" style="font-size:28px;color:var(--hint)"></i>
+      <p style="margin:6px 0 2px;font-size:13px">Arraste o arquivo aqui ou clique para selecionar</p>
+      <p style="font-size:11px;color:var(--hint)">.xlsx</p>
+      <input type="file" accept=".xlsx" style="position:absolute;inset:0;opacity:0;cursor:pointer" id="mems-bom-fi">
+    </div>
+    <div id="mems-bom-prev" style="margin-top:12px"></div>
+  `;
+  document.getElementById('mems-bom-fi')?.addEventListener('change', e => {
+    if (e.target.files[0]) handleMemsBomFile(e.target.files[0]);
+  });
+  const dz = document.getElementById('mems-bom-drop');
+  dz?.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
+  dz?.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+  dz?.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) handleMemsBomFile(e.dataTransfer.files[0]);
+  });
+  toggleMemsUpdateApply(false);
+}
+
+async function handleMemsBomFile(file) {
+  showLoading('Lendo estrutura de produtos…');
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    let edges = [];
+    for (const sheetName of wb.SheetNames) {
+      edges = parseBomSheet(wb.Sheets[sheetName]);
+      if (edges.length) break;
+    }
+    const components = new Set(edges.map(e => e.code));
+    pendingMemsBom = { edges, filename: file.name };
+    const prev = document.getElementById('mems-bom-prev');
+    if (prev) prev.innerHTML = edges.length ? `
+      <div class="alert" style="background:var(--ok-bg);border-color:var(--ok-text);color:var(--ok-text)">
+        <i class="ti ti-check"></i>
+        <strong>${edges.length} relações</strong> · ${components.size} componentes
+        <span style="margin-left:auto;font-size:11px;color:var(--hint)">${file.name}</span>
+      </div>
+    ` : `
+      <div class="alert" style="align-items:flex-start">
+        <i class="ti ti-alert-circle"></i>
+        <div>Não encontramos as colunas esperadas (Cód. Produto, Cód. Próximo Uso). Colunas encontradas:<br>
+          <span style="font-size:11px;color:var(--hint)">${memsFileHeaderPreview(wb)}</span>
+        </div>
+      </div>
+    `;
+    toggleMemsUpdateApply(edges.length > 0, applyMemsBomImport);
+  } catch(err) {
+    showToast('Erro ao ler arquivo: ' + err.message, 'err');
+  } finally {
+    hideLoading();
+  }
+}
+
+function applyMemsBomImport() {
+  if (!pendingMemsBom) return;
+  showLoading('Atualizando estrutura…');
+  setTimeout(() => {
+    memsBom = pendingMemsBom.edges;
+    _bomIdx = null; // índices de ramo seco dependem da estrutura
+    saveMemsBom();
+    memsMeta.bomUpdatedAt = new Date().toISOString();
+    saveMemsMeta();
+    const n = memsBom.length;
+    resetMemsMaterialsSection();
+    hideLoading();
+    showToast(`Estrutura atualizada: ${n} relações`);
+    renderMems();
+  }, 0);
+}
+
+// ── FORECAST ────────────────────────────────────────────────────────────
+// Mesmo layout da Estrutura (Cód. Produto / Cód. Próximo Uso / Uso), mas com uma
+// linha de meses (ex: "jul/26") acima da linha de cabeçalho, alinhada por coluna —
+// cada célula já vem com a quantidade prevista do "próximo uso" multiplicada pelo
+// Uso daquela linha, então só precisamos somar por material quando ele aparece em
+// mais de uma relação (mesma lógica de agregação da Estrutura). As células de mês
+// são datas de verdade no Excel (formatadas como "jul/26"), então lemos com
+// cellDates:true e identificamos a coluna por instanceof Date, não pelo texto —
+// já vimos essa pegadinha antes (planilha de trânsito) e o texto muda conforme
+// a formatação regional do Excel de quem gerou o arquivo.
+function parseForecastSheet(ws) {
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const headerRowIdx = rows.findIndex(r => r.some(c => String(c).trim() === 'Cód. Produto'));
+  if (headerRowIdx === -1) return null;
+  const header = rows[headerRowIdx].map(h => String(h).trim());
+  const iCode   = header.indexOf('Cód. Produto');
+  const iParent = header.indexOf('Cód. Próximo Uso');
+  const iQty    = header.indexOf('Uso');
+  if (iCode === -1 || iParent === -1) return null;
+  const monthRow = headerRowIdx > 0 ? rows[headerRowIdx - 1] : [];
+  const monthCols = [];
+  monthRow.forEach((cell, col) => {
+    const d = cell instanceof Date && !isNaN(cell) ? cell : null;
+    if (!d) return;
+    monthCols.push({ col, key: toMonthKey(d) });
+  });
+  if (!monthCols.length) return null; // sem meses reconhecidos -> não é esse formato
+  const out = [];
+  for (let r = headerRowIdx + 1; r < rows.length; r++) {
+    const row    = rows[r];
+    const code   = String(row[iCode] || '').trim().toUpperCase();
+    const parent = String(row[iParent] || '').trim().toUpperCase();
+    if (!code || !parent || parent === '-') continue;
+    const monthly = {};
+    monthCols.forEach(({ col, key }) => { monthly[key] = toNum(row[col]); });
+    out.push({ code, qty: iQty !== -1 ? (toNum(row[iQty]) || 1) : 1, monthly });
+  }
+  return out;
+}
+
 function renderMemsForecastBody(body) {
   body.innerHTML = `
-    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de cobertura de estoque da PCP. Lemos <strong>Média Forec.</strong> das abas MP / ME e MS, casando pelo código.</div>
+    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de forecast cascateada pela Estrutura (colunas Cód. Produto, Cód. Próximo Uso, Uso, com uma linha de meses acima do cabeçalho) <strong>ou</strong> a planilha de cobertura da PCP com a coluna <strong>Média Forec.</strong> nas abas MP / ME e MS.</div>
     <div class="drop-zone" id="mems-forecast-drop">
       <i class="ti ti-cloud-upload" style="font-size:28px;color:var(--hint)"></i>
       <p style="margin:6px 0 2px;font-size:13px">Arraste o arquivo aqui ou clique para selecionar</p>
@@ -2094,29 +2906,78 @@ function renderMemsForecastBody(body) {
 }
 
 async function handleMemsForecastFile(file) {
+  showLoading('Lendo arquivo de forecast…');
   try {
-    const imported = await importCoverageFile(file, { avgForecast: ['forec'] });
-    pendingMemsForecast = { items: imported, filename: file.name };
-    renderCoveragePreview('mems-forecast-prev', imported, file.name);
-    toggleMemsUpdateApply(imported.length > 0, applyMemsForecastImport);
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+    let rawRows = null;
+    for (const sheetName of wb.SheetNames) {
+      rawRows = parseForecastSheet(wb.Sheets[sheetName]);
+      if (rawRows && rawRows.length) break;
+    }
+
+    if (rawRows && rawRows.length) {
+      const codeSet = new Set(memsItems.map(i => i.code.toUpperCase()));
+      const map = {}; // code -> { mk: soma }
+      rawRows.forEach(r => {
+        if (!codeSet.has(r.code)) return;
+        if (!map[r.code]) map[r.code] = {};
+        Object.entries(r.monthly).forEach(([mk, v]) => { map[r.code][mk] = (map[r.code][mk] || 0) + v; });
+      });
+      const items = Object.entries(map);
+      const months = [...new Set(items.flatMap(([, mData]) => Object.keys(mData)))].sort();
+      pendingMemsForecast = { items, months, filename: file.name, totalRows: rawRows.length, raw: true };
+      const prev = document.getElementById('mems-forecast-prev');
+      if (prev) prev.innerHTML = items.length ? `
+        <div class="alert" style="background:var(--ok-bg);border-color:var(--ok-text);color:var(--ok-text)">
+          <i class="ti ti-check"></i>
+          <strong>${items.length} materiais</strong> com forecast (${months.map(fmtMonthKey).join(', ')})
+          <span style="margin-left:auto;font-size:11px;color:var(--hint)">${file.name} · ${rawRows.length} linhas</span>
+        </div>
+      ` : `<div class="alert"><i class="ti ti-alert-circle"></i> Nenhum código do cadastro de materiais foi encontrado nesse arquivo.</div>`;
+      toggleMemsUpdateApply(items.length > 0, applyMemsForecastImport);
+    } else {
+      const imported = await importCoverageFile(file, { avgForecast: ['forec'] });
+      pendingMemsForecast = { items: imported, filename: file.name, raw: false };
+      renderCoveragePreview('mems-forecast-prev', imported, file.name);
+      toggleMemsUpdateApply(imported.length > 0, applyMemsForecastImport);
+    }
   } catch(err) {
     showToast('Erro ao ler arquivo: ' + err.message, 'err');
+  } finally {
+    hideLoading();
   }
 }
 
 function applyMemsForecastImport() {
   if (!pendingMemsForecast) return;
-  pendingMemsForecast.items.forEach(item => {
-    const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
-    if (existing) existing.avgForecast = item.avgForecast;
-  });
-  saveMemsItems();
-  memsMeta.forecastUpdatedAt = new Date().toISOString();
-  saveMemsMeta();
-  const n = pendingMemsForecast.items.length;
-  resetMemsMaterialsSection();
-  showToast(`Forecast atualizado: ${n} itens`);
-  renderMems();
+  showLoading('Atualizando forecast…');
+  setTimeout(() => {
+    if (pendingMemsForecast.raw) {
+      pendingMemsForecast.items.forEach(([code, monthData]) => {
+        const existing = memsItems.find(i => i.code.toUpperCase() === code);
+        if (!existing) return;
+        existing.forecastHistory = existing.forecastHistory || {};
+        Object.entries(monthData).forEach(([mk, qty]) => {
+          existing.forecastHistory[mk] = Math.max(0, Math.round(qty));
+        });
+        existing.avgForecast = memsAvgForecast(existing);
+      });
+    } else {
+      pendingMemsForecast.items.forEach(item => {
+        const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
+        if (existing) existing.avgForecast = item.avgForecast;
+      });
+    }
+    saveMemsItems();
+    memsMeta.forecastUpdatedAt = new Date().toISOString();
+    saveMemsMeta();
+    const n = pendingMemsForecast.items.length;
+    resetMemsMaterialsSection();
+    hideLoading();
+    showToast(`Forecast atualizado: ${n} itens`);
+    renderMems();
+  }, 0);
 }
 
 /* ── Boot ── */
@@ -2283,8 +3144,248 @@ function openSalesModal(code) {
   document.getElementById('modal-overlay').style.display = 'flex';
 }
 
+function openMemsConsumoModal(code) {
+  const item = memsItems.find(i => i.code.toUpperCase() === String(code).toUpperCase());
+  if (!item) return;
+  const keys    = getLast6Keys();
+  const consumo = keys.map(k => ({ month: fmtMonthKey(k), qty: item.consumoHistory?.[k] || 0 }));
+  const total   = consumo.reduce((s,r) => s+r.qty, 0);
+  const avg     = memsAvgConsumption(item);
+  const maxQ    = Math.max(...consumo.map(r=>r.qty), 1);
+  const bars    = consumo.map(r => {
+    const pct = ((r.qty/maxQ)*100).toFixed(1);
+    return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <span style="width:60px;font-size:12px;color:var(--muted);flex-shrink:0">${r.month}</span>
+      <div style="flex:1;background:var(--border);border-radius:3px;height:18px;overflow:hidden">
+        <div style="width:${pct}%;background:var(--accent);height:100%;border-radius:3px;transition:width .3s"></div>
+      </div>
+      <span style="width:50px;text-align:right;font-size:13px;font-weight:500">${fmt.int(r.qty)}</span>
+    </div>`;
+  }).join('');
+  document.getElementById('modal-title').textContent = `Histórico de consumo — ${item.code}`;
+  document.getElementById('modal-body').innerHTML = `
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">${item.desc}</p>
+    ${bars}
+    <div style="display:flex;gap:24px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:13px">
+      <div><span style="color:var(--muted)">Total 6 meses:</span> <strong>${fmt.int(total)} un</strong></div>
+      <div><span style="color:var(--muted)">Consumo médio:</span> <strong>${fmt.int(avg)} un/mês</strong></div>
+      <div><span style="color:var(--muted)">Cobertura atual:</span> <strong>${fmt.cov(memsCoverage(item))}</strong></div>
+    </div>
+    <div class="form-actions" style="margin-top:16px">
+      <button class="btn btn-primary" id="btn-modal-cancel">Fechar</button>
+    </div>`;
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeProductModal);
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+function openMemsForecastModal(code) {
+  const item = memsItems.find(i => i.code.toUpperCase() === String(code).toUpperCase());
+  if (!item) return;
+  const keys     = getNext6Keys();
+  const forecast = keys.map(k => ({ month: fmtMonthKey(k), qty: item.forecastHistory?.[k] || 0 }));
+  const total    = forecast.reduce((s,r) => s+r.qty, 0);
+  const avg      = memsAvgForecast(item);
+  const maxQ     = Math.max(...forecast.map(r=>r.qty), 1);
+  const bars     = forecast.map(r => {
+    const pct = ((r.qty/maxQ)*100).toFixed(1);
+    return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <span style="width:60px;font-size:12px;color:var(--muted);flex-shrink:0">${r.month}</span>
+      <div style="flex:1;background:var(--border);border-radius:3px;height:18px;overflow:hidden">
+        <div style="width:${pct}%;background:var(--accent);height:100%;border-radius:3px;transition:width .3s"></div>
+      </div>
+      <span style="width:50px;text-align:right;font-size:13px;font-weight:500">${fmt.int(r.qty)}</span>
+    </div>`;
+  }).join('');
+  document.getElementById('modal-title').textContent = `Histórico de forecast — ${item.code}`;
+  document.getElementById('modal-body').innerHTML = `
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">${item.desc}</p>
+    ${bars}
+    <div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:13px">
+      <div><span style="color:var(--muted)">Total 6 meses (previsto):</span> <strong>${fmt.int(total)} un</strong></div>
+      <div><span style="color:var(--muted)">Forecast médio:</span> <strong>${fmt.int(avg)} un/mês</strong></div>
+      <div><span style="color:var(--muted)">Consumo real médio:</span> <strong>${fmt.int(item.avgConsumption||0)} un/mês</strong></div>
+      <div><span style="color:var(--muted)">Pior caso (usado na cobertura):</span> <strong>${fmt.int(memsForecastWorstCase(item))} un/mês</strong></div>
+    </div>
+    <div class="form-actions" style="margin-top:16px">
+      <button class="btn btn-primary" id="btn-modal-cancel">Fechar</button>
+    </div>`;
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeProductModal);
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+function openMemsTransitModal(code) {
+  const item = memsItems.find(i => i.code.toUpperCase() === String(code).toUpperCase());
+  if (!item) return;
+  const entries = item.transitEntries || [];
+  const fmtDate = d => { const dt = d ? new Date(d) : null; return (dt instanceof Date && !isNaN(dt)) ? dt.toLocaleDateString('pt-BR') : '—'; };
+  const rows = entries.map(e => `<tr>
+      <td>${e.embarque ? e.embarque : '—'}</td>
+      <td class="num-c">${fmt.int(e.qty)}</td>
+      <td>${fmtDate(e.arrivalDate)}</td>
+    </tr>`).join('');
+  document.getElementById('modal-title').textContent = `Itens em trânsito — ${item.code}`;
+  document.getElementById('modal-body').innerHTML = `
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">${item.desc}</p>
+    <div class="tbl-wrap" style="margin-bottom:0">
+      <table>
+        <thead><tr><th>Embarque</th><th class="num-c">Quantidade</th><th>Data chegada</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="3" class="empty">Nenhum embarque encontrado.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div style="display:flex;gap:24px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:13px">
+      <div><span style="color:var(--muted)">Total em trânsito:</span> <strong>${fmt.int(item.inTransit||0)} un</strong></div>
+    </div>
+    <div class="form-actions" style="margin-top:16px">
+      <button class="btn btn-primary" id="btn-modal-cancel">Fechar</button>
+    </div>`;
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeProductModal);
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+// Modal da cobertura em cadeia: estoque de cada produto (PI/SA/PA) que consome o item,
+// com o equivalente em unidades do item (estoque × uso acumulado na cadeia)
+function openMemsCoverageModal(code) {
+  const item = memsItems.find(i => i.code.toUpperCase() === String(code).toUpperCase());
+  if (!item) return;
+  const factors = memsDownstreamFactors(item.code);
+  const nodeType = c => {
+    if (memsItems.some(i => i.code.toUpperCase() === c)) return memsItems.find(i => i.code.toUpperCase() === c).type || 'MAT';
+    if (SA_REVERSE_MAP[c]) return 'SA';
+    if (state.getByCode(c)) return 'PA';
+    if (c.startsWith('PI')) return 'PI';
+    return '—';
+  };
+  const dryAll   = memsDryBranches(item);
+  const dryMap   = Object.fromEntries(dryAll.map(b => [b.final, b]));
+  const drySales = dryAll.filter(b => b.hasSales);
+  const rows = Object.entries(factors).map(([node, factor]) => {
+    const stock = memsNodeStock(node);
+    return { node, type: nodeType(node), stock, factor, equiv: stock * factor, dry: dryMap[node] };
+  }).sort((a,b) => b.equiv - a.equiv);
+  const embedded = rows.reduce((s,r) => s + r.equiv, 0);
+  const own      = item.stock || 0;
+  const cons     = item.avgConsumption || 0;
+  const cov      = memsCoverage(item);
+  const situacao = r => {
+    if (r.dry) {
+      if (r.dry.dry) {
+        return r.dry.hasSales
+          ? `<span style="color:var(--danger-text);font-weight:500">⚠️ ruptura imediata</span>`
+          : `<span style="color:var(--hint)">ramo seco · sem vendas</span>`;
+      }
+      return r.dry.hasSales
+        ? `<span style="color:var(--warn-text);font-weight:500">⚠️ esgota em ${r.dry.monthsLeft.toFixed(1)}m</span>`
+        : `<span style="color:var(--hint)">ramo em risco · sem vendas</span>`;
+    }
+    if (r.type === 'PA' && r.stock > 0) return `<span style="color:var(--ok-text)">✓ atendendo</span>`;
+    return '<span style="color:var(--hint)">—</span>';
+  };
+  const rowsHtml = rows.map(r => {
+    const rowBg = r.dry?.hasSales ? (r.dry.dry ? 'var(--danger-bg)' : 'var(--warn-bg)') : '';
+    return `<tr ${rowBg ? `style="background:${rowBg}"` : ''}>
+      <td><strong>${r.node}</strong></td>
+      <td class="num-c"><span class="badge" style="background:var(--accent-bg);color:var(--accent)">${r.type}</span></td>
+      <td class="num-c">${fmt.int(r.stock)}</td>
+      <td class="num-c" style="color:var(--muted)">${r.factor.toLocaleString('pt-BR',{maximumFractionDigits:3})}</td>
+      <td class="num-c" style="font-weight:500">${fmt.int(r.equiv)}</td>
+      <td style="font-size:12px;white-space:nowrap">${situacao(r)}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('modal-title').textContent = `Cobertura em cadeia — ${item.code}`;
+  document.getElementById('modal-body').innerHTML = `
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">${item.desc}</p>
+    ${drySales.length ? `
+      <div class="alert" style="margin-bottom:12px">
+        <i class="ti ti-alert-triangle"></i>
+        <span><strong>${drySales.length} ${drySales.length===1?'produto':'produtos'} em risco de ruptura</strong> — o estoque desse ramo específico não cobre até a reposição do material: ${drySales.map(b => b.dry ? `${b.final} (imediata)` : `${b.final} (~${b.monthsLeft.toFixed(1)}m)`).join(', ')}</span>
+      </div>
+    ` : ''}
+    <div class="tbl-wrap" style="margin-bottom:0">
+      <table>
+        <thead><tr><th>Consumido por</th><th class="num-c">Nível</th><th class="num-c">Estoque</th><th class="num-c">Uso/un</th><th class="num-c">Equivalente (un)</th><th>Situação</th></tr></thead>
+        <tbody>${rowsHtml || '<tr><td colspan="6" class="empty">Nenhum produto na cadeia.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div style="display:flex;gap:20px;flex-wrap:wrap;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:13px">
+      <div><span style="color:var(--muted)">Estoque próprio:</span> <strong>${fmt.int(own)} un</strong></div>
+      <div><span style="color:var(--muted)">Embutido na cadeia:</span> <strong>${fmt.int(embedded)} un</strong></div>
+      <div><span style="color:var(--muted)">Consumo médio:</span> <strong>${cons > 0 ? fmt.int(Math.ceil(cons)) + ' un/mês' : '—'}</strong></div>
+      <div><span style="color:var(--muted)">Cobertura em cadeia:</span> <strong>${fmt.cov(cov)}</strong></div>
+    </div>
+    <div class="form-actions" style="margin-top:16px">
+      <button class="btn btn-primary" id="btn-modal-cancel">Fechar</button>
+    </div>`;
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeProductModal);
+  const modalBox = document.querySelector('#modal-overlay .modal');
+  if (modalBox) modalBox.style.maxWidth = '680px';
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+// Pra Antecipação: se o item entrou na fila por causa de um ramo específico (a soma
+// agregada tá ok, mas aquele PA vai secar), mostra a data de ruptura DAQUELE ramo —
+// senão a coluna "Esgota em" mostraria a data agregada, distante, sem explicar por
+// que o item apareceu na lista.
+function memsAnticipationDisplayInfo(item) {
+  const branches = memsAnticipationSalesBranches(item);
+  if (branches.length) {
+    const worst = branches.reduce((a, b) => a.monthsLeft < b.monthsLeft ? a : b);
+    return { stockoutDate: new Date(Date.now() + worst.monthsLeft * 30.44 * 86400000), note: `ramo ${worst.final}` };
+  }
+  return { stockoutDate: memsStockoutDate(item), note: null };
+}
+
+function openMemsAlertModal(type) {
+  const isPurchase = type === 'purchase';
+  const items = isPurchase ? memsPurchaseQueue() : memsAnticipationQueue();
+  const fmtDate = d => { const dt = d ? new Date(d) : null; return (dt instanceof Date && !isNaN(dt)) ? dt.toLocaleDateString('pt-BR') : '—'; };
+  const rows = items.map(i => isPurchase ? `<tr>
+      <td><strong>${i.code}</strong></td>
+      <td class="td-desc"><div title="${i.desc}">${i.desc}</div></td>
+      <td class="num-c">${fmt.int(i.stock||0)}</td>
+      <td class="num-c">${fmt.int(i.avgConsumption||0)}/mês</td>
+      <td class="num-c">${i.leadTime ?? '—'} m</td>
+      <td class="num-c">${fmt.cov(memsCoverage(i))}</td>
+      <td class="num-c">${Number.isFinite(memsLeadCoveragePct(i)) ? Math.round(memsLeadCoveragePct(i)*100)+'%' : '—'}</td>
+    </tr>` : (() => {
+      const info = memsAnticipationDisplayInfo(i);
+      return `<tr>
+      <td><strong>${i.code}</strong></td>
+      <td class="td-desc"><div title="${i.desc}">${i.desc}</div></td>
+      <td class="num-c">${fmt.int(i.stock||0)}</td>
+      <td class="num-c">${fmt.int(i.avgConsumption||0)}/mês</td>
+      <td>${fmtDate(info.stockoutDate)}${info.note ? `<div style="font-size:10px;color:var(--hint)">${info.note}</div>` : ''}</td>
+      <td>${fmtDate(memsNextArrival(i))}</td>
+    </tr>`;
+    })()).join('');
+  const head = isPurchase
+    ? `<tr><th>Código</th><th>Descrição</th><th class="num-c">Estoque</th><th class="num-c">Consumo</th><th class="num-c">Lead Time</th><th class="num-c">Cobertura</th><th class="num-c">% coberto</th></tr>`
+    : `<tr><th>Código</th><th>Descrição</th><th class="num-c">Estoque</th><th class="num-c">Consumo</th><th>Esgota em</th><th>Chega em</th></tr>`;
+  document.getElementById('modal-title').textContent = isPurchase
+    ? `Compra pendente — ${items.length} ${items.length===1?'item':'itens'}`
+    : `Necessário antecipação — ${items.length} ${items.length===1?'item':'itens'}`;
+  document.getElementById('modal-body').innerHTML = `
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">${isPurchase
+      ? 'Itens cujo estoque atual acaba antes do lead time de um novo pedido chegar.'
+      : 'Itens cujo estoque atual acaba antes do primeiro recebimento já em trânsito.'}</p>
+    <div class="tbl-wrap" style="margin-bottom:0">
+      <table>
+        <thead>${head}</thead>
+        <tbody>${rows || `<tr><td colspan="${isPurchase?7:6}" class="empty">Nenhum item em alerta.</td></tr>`}</tbody>
+      </table>
+    </div>
+    <div class="form-actions" style="margin-top:16px">
+      <button class="btn btn-primary" id="btn-modal-cancel">Fechar</button>
+    </div>`;
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeProductModal);
+  const modalBox = document.querySelector('#modal-overlay .modal');
+  if (modalBox) modalBox.style.maxWidth = '760px';
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
 function closeProductModal() {
   document.getElementById('modal-overlay').style.display = 'none';
+  const modalBox = document.querySelector('#modal-overlay .modal');
+  if (modalBox) modalBox.style.maxWidth = '';
   editingCode = null;
 }
 </script>

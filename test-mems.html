@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Testes — Cobertura e Alertas de Materiais</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:820px;margin:32px auto;padding:0 20px;color:#1a2628}
+  h1{font-size:18px;font-weight:500;margin-bottom:4px}
+  p.sub{color:#7a9499;font-size:13px;margin-bottom:24px}
+  .case{border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:10px 14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+  .case.pass{border-color:#1A6639;background:#E4F5EC}
+  .case.fail{border-color:#841E1E;background:#FEECEC}
+  .case .name{font-size:13px}
+  .case .detail{font-size:11px;color:#4e6569;margin-top:2px}
+  .case .badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;white-space:nowrap}
+  .pass .badge{background:#1A6639;color:#fff}
+  .fail .badge{background:#841E1E;color:#fff}
+  #summary{font-size:15px;font-weight:500;margin:20px 0;padding:12px 16px;border-radius:8px}
+  #summary.pass{background:#E4F5EC;color:#1A6639}
+  #summary.fail{background:#FEECEC;color:#841E1E}
+</style>
+</head>
+<body>
+<h1>Testes de regressão — cobertura e alertas de materiais</h1>
+<p class="sub">Roda a lógica real do <code>index.html</code> dentro de uma iframe com localStorage isolado (não toca nos dados reais). Recarregue esta página depois de mexer nas funções mems* para conferir se nada quebrou.</p>
+<div id="summary">Rodando…</div>
+<div id="results"></div>
+
+<script>
+// Corpo dos testes: roda DENTRO da iframe (mesmo escopo global do script do app),
+// porque memsItems/memsBom/state são `let`/`const` no topo do script — não viram
+// propriedades de window, então só são acessíveis por um <script> na mesma página.
+// Ao final grava window.__testResults pra a página de fora ler.
+const TEST_BODY = `
+function assertClose(name, actual, expected, tol, detail) {
+  const ok = (actual === expected) ||
+    (Number.isFinite(actual) && Number.isFinite(expected) && Math.abs(actual - expected) <= (tol ?? 0.01));
+  __results.push({ name, ok, detail: detail || ('esperado ' + expected + ', veio ' + actual) });
+}
+function assertEqual(name, actual, expected, detail) {
+  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  __results.push({ name, ok, detail: detail || ('esperado ' + JSON.stringify(expected) + ', veio ' + JSON.stringify(actual)) });
+}
+function assertTrue(name, cond, detail) { __results.push({ name, ok: !!cond, detail }); }
+
+function mkMemsItem(over) {
+  return Object.assign({
+    code: 'TEST', desc: 'item de teste', type: 'MP', family: '', supplier: '', origin: '',
+    leadTime: null, stock: 0, avgForecast: 0, avgConsumption: 0,
+    inTransit: 0, consumoHistory: {}, forecastHistory: {}, transitEntries: [],
+  }, over);
+}
+function withPAsalesFlat(monthlyQty) {
+  const keys = getLast6Keys();
+  return Object.fromEntries(keys.map(k => [k, monthlyQty]));
+}
+
+window.__results = [];
+const __results = window.__results;
+
+try {
+  // Caso 1: cobertura própria simples
+  {
+    const item = mkMemsItem({ stock: 100, avgConsumption: 25 });
+    assertClose('Cobertura própria = estoque / consumo', memsOwnCoverage(item), 4, 0.01);
+  }
+
+  // Caso 2: cobertura em cadeia = soma de todos os pontos / consumo da MP
+  {
+    memsBom.length = 0;
+    memsBom.push(
+      { code: 'MPX', parent: 'SAX', final: 'PAX1', qty: 1 },
+      { code: 'SAX', parent: 'PAX1', final: 'PAX1', qty: 1 },
+      { code: 'MPX', parent: 'SAY', final: 'PAX2', qty: 2 },
+      { code: 'SAY', parent: 'PAX2', final: 'PAX2', qty: 1 },
+    );
+    _bomIdx = null;
+    const item = mkMemsItem({ code: 'MPX', stock: 0, avgConsumption: 50 });
+    memsItems.length = 0; memsItems.push(item);
+    state.addOrUpdate({ code: 'PAX1', description: 'PA1', stock: 40 });
+    state.addOrUpdate({ code: 'PAX2', description: 'PA2', stock: 30 });
+    // embutido = 40 (SAX, fator 1) + 30*2 (SAY, fator 2) = 100 ; consumo MP = 50 -> 2.0m
+    assertClose('Cobertura em cadeia soma todos os ramos (embutido / consumo da MP)',
+      memsCoverage(item), 2.0, 0.01, 'embutido=100, consumo MP=50 -> 2.0m');
+  }
+
+  // Caso 3: material com 1 só produto final não gera "ramo em risco"
+  {
+    memsBom.length = 0;
+    memsBom.push({ code: 'MPS', parent: 'PAS', final: 'PAS', qty: 1 });
+    _bomIdx = null;
+    const item = mkMemsItem({ code: 'MPS', stock: 0, avgConsumption: 10, leadTime: 3 });
+    memsItems.length = 0; memsItems.push(item);
+    state.addOrUpdate({ code: 'PAS', description: 'PA único', stock: 0 });
+    assertEqual('1 produto final só -> sem alerta de ramo em risco', memsDryBranches(item), []);
+  }
+
+  // Caso 4: múltiplos ramos — o pior ramo derruba o status mesmo com soma boa
+  {
+    memsBom.length = 0;
+    memsBom.push(
+      { code: 'MPM', parent: 'PAM1', final: 'PAM1', qty: 1 },
+      { code: 'MPM', parent: 'PAM2', final: 'PAM2', qty: 1 },
+    );
+    _bomIdx = null;
+    const item = mkMemsItem({ code: 'MPM', stock: 0, avgConsumption: 175, leadTime: 5 });
+    memsItems.length = 0; memsItems.push(item);
+    state.addOrUpdate({ code: 'PAM1', description: 'PA bem servido', stock: 5000, salesHistory: withPAsalesFlat(20) });
+    state.addOrUpdate({ code: 'PAM2', description: 'PA seco', stock: 0, salesHistory: withPAsalesFlat(10) });
+    const dry = memsDrySalesBranches(item);
+    assertTrue('Ramo seco detectado mesmo com outro ramo bem servido',
+      dry.length === 1 && dry[0].final === 'PAM2', 'dry=' + JSON.stringify(dry));
+    assertEqual('Status forçado para Crítico por ramo seco', memsStatus(item), 'crit');
+  }
+
+  // Caso 5: compra em trânsito chegando ANTES da ruptura do ramo remove o risco
+  {
+    const item = memsItems.find(i => i.code === 'MPM');
+    const paM2 = state.getByCode('PAM2');
+    paM2.stock = 20; // 20un / 10un-mês = 2 meses -> insuficiente p/ leadTime 5, mas não zerado
+    item.inTransit = 100;
+    item.transitEntries = [{ embarque: 'E1', qty: 100, arrivalDate: new Date(Date.now() + 30 * 86400000) }];
+    assertEqual('Trânsito chegando antes da ruptura (1m < 2m) remove o risco do ramo',
+      memsDrySalesBranches(item), []);
+  }
+
+  // Caso 6: compra em trânsito chegando DEPOIS da ruptura mantém o risco
+  {
+    const item = memsItems.find(i => i.code === 'MPM');
+    item.transitEntries = [{ embarque: 'E1', qty: 100, arrivalDate: new Date(Date.now() + 120 * 86400000) }];
+    const dry = memsDrySalesBranches(item);
+    assertTrue('Trânsito chegando depois da ruptura (4m > 2m) mantém o risco',
+      dry.length === 1 && dry[0].final === 'PAM2', 'dry=' + JSON.stringify(dry));
+  }
+
+  // Caso 7: compra pendente
+  {
+    const item = mkMemsItem({ stock: 20, avgConsumption: 10, leadTime: 3, inTransit: 0 });
+    assertTrue('Sem trânsito: cobertura <= lead time -> compra pendente', memsNeedsReorder(item) === true);
+  }
+  {
+    const item = mkMemsItem({ stock: 40, avgConsumption: 10, leadTime: 3, inTransit: 0 });
+    assertTrue('Sem trânsito: cobertura > lead time -> não pendente', memsNeedsReorder(item) === false);
+  }
+  {
+    const item = mkMemsItem({ stock: 0, avgConsumption: 10, leadTime: 3, inTransit: 20 });
+    assertTrue('Com trânsito: cobertura combinada == lead time ainda é pendente (regra usa <)', memsNeedsReorder(item) === true);
+  }
+  {
+    const item = mkMemsItem({ stock: 10, avgConsumption: 10, leadTime: 3, inTransit: 20 });
+    assertTrue('Com trânsito: cobertura combinada > lead time -> não pendente', memsNeedsReorder(item) === false);
+  }
+
+  // Caso 8: Antecipação por ramo — soma agregada ok, mas um ramo específico vai
+  // secar antes do embarque em trânsito chegar (mesmo problema da Compra pendente,
+  // agora aplicado ao alerta de Antecipação)
+  {
+    memsBom.length = 0;
+    memsBom.push(
+      { code: 'MPA', parent: 'PAA1', final: 'PAA1', qty: 1 },
+      { code: 'MPA', parent: 'PAA2', final: 'PAA2', qty: 1 },
+    );
+    _bomIdx = null;
+    // consumo próprio da MP bem baixo -> cobertura agregada gigante, longe de virar
+    // Compra pendente (isso é o que faz o caso ser só de Antecipação, não de reposição)
+    const item = mkMemsItem({ code: 'MPA', stock: 0, avgConsumption: 1, leadTime: 6, inTransit: 50 });
+    item.transitEntries = [{ embarque: 'EA', qty: 50, arrivalDate: new Date(Date.now() + 120 * 86400000) }]; // chega em 4 meses
+    memsItems.length = 0; memsItems.push(item);
+    state.addOrUpdate({ code: 'PAA1', description: 'PA folgado', stock: 1000, salesHistory: withPAsalesFlat(5) });
+    state.addOrUpdate({ code: 'PAA2', description: 'PA apertado', stock: 5, salesHistory: withPAsalesFlat(50) }); // ~3 dias de estoque
+
+    assertTrue('Agregado não é compra pendente (cobertura da MP é gigante)', memsNeedsReorder(item) === false);
+    const antBranches = memsAnticipationSalesBranches(item);
+    assertTrue('Ramo apertado (PAA2) detectado para Antecipação',
+      antBranches.length === 1 && antBranches[0].final === 'PAA2', 'branches=' + JSON.stringify(antBranches));
+    assertEqual('memsNeedsAnticipation reflete o ramo em risco', memsNeedsAnticipation(item), true);
+  }
+
+  // Caso 9: mesmo cenário, mas o embarque chega ANTES da ruptura do ramo -> sem antecipação
+  {
+    const item = memsItems.find(i => i.code === 'MPA');
+    item.transitEntries = [{ embarque: 'EA', qty: 50, arrivalDate: new Date(Date.now() + 1 * 86400000) }]; // chega amanhã
+    assertEqual('Embarque chegando antes da ruptura do ramo -> sem antecipação', memsNeedsAnticipation(item), false);
+  }
+
+  // Caso 10: pior caso = maior entre consumo real e forecast (calculado, não importado)
+  {
+    memsRealOnly = false;
+    const item1 = mkMemsItem({ avgConsumption: 100, avgForecast: 60 });
+    assertClose('Pior caso usa o real quando real > forecast', memsForecastWorstCase(item1), 100, 0.01);
+    const item2 = mkMemsItem({ avgConsumption: 40, avgForecast: 90 });
+    assertClose('Pior caso usa o forecast quando forecast > real', memsForecastWorstCase(item2), 90, 0.01);
+  }
+
+  // Caso 11: por padrão (toggle desligado), a Cobertura usa o pior caso
+  {
+    memsBom.length = 0; _bomIdx = null;
+    memsRealOnly = false;
+    const item = mkMemsItem({ stock: 90, avgConsumption: 30, avgForecast: 45 });
+    // pior caso = max(30,45)=45 -> cobertura = 90/45 = 2.0m (não 90/30=3.0m)
+    assertClose('Cobertura usa consumo efetivo (pior caso) por padrão', memsCoverage(item), 2.0, 0.01);
+  }
+
+  // Caso 12: com o toggle "só consumo real" ligado, a Cobertura ignora o forecast
+  {
+    memsRealOnly = true;
+    const item = mkMemsItem({ stock: 90, avgConsumption: 30, avgForecast: 45 });
+    assertClose('Com toggle ligado, cobertura usa só consumo real', memsCoverage(item), 3.0, 0.01);
+    memsRealOnly = false; // restaura o padrão pros próximos testes/execuções
+  }
+
+  window.__testError = null;
+} catch (e) {
+  window.__testError = e.message;
+}
+window.__testDone = true;
+`;
+
+function render(results, error) {
+  const el = document.getElementById('results');
+  const summary = document.getElementById('summary');
+  if (error) {
+    summary.className = 'fail';
+    summary.textContent = 'Erro ao rodar os testes: ' + error;
+    return;
+  }
+  el.innerHTML = results.map(r => `
+    <div class="case ${r.ok ? 'pass' : 'fail'}">
+      <div><div class="name">${r.name}</div>${r.detail ? `<div class="detail">${r.detail}</div>` : ''}</div>
+      <span class="badge">${r.ok ? 'PASSOU' : 'FALHOU'}</span>
+    </div>`).join('');
+  const failed = results.filter(r => !r.ok).length;
+  summary.className = failed ? 'fail' : 'pass';
+  summary.textContent = failed
+    ? `${failed} de ${results.length} teste(s) falharam`
+    : `Todos os ${results.length} testes passaram`;
+}
+
+async function run() {
+  const html = await fetch('/index.html').then(r => r.text());
+  const shim = `<script>
+    (function(){
+      const store = {};
+      const fake = {
+        getItem: k => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = String(v); },
+        removeItem: k => { delete store[k]; },
+        clear: () => { for (const k in store) delete store[k]; },
+        key: i => Object.keys(store)[i] || null,
+        get length() { return Object.keys(store).length; },
+      };
+      Object.defineProperty(window, 'localStorage', { value: fake, configurable: true });
+    })();
+  <\/script>`;
+  let patched = html.replace('<head>', '<head>' + shim);
+  patched = patched.replace('</body>', `<script>${TEST_BODY}<\/script></body>`);
+
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  document.body.appendChild(iframe);
+
+  await new Promise(resolve => {
+    iframe.onload = resolve;
+    iframe.srcdoc = patched;
+  });
+
+  const w = iframe.contentWindow;
+  const start = Date.now();
+  while (!w.__testDone && Date.now() - start < 5000) {
+    await new Promise(r => setTimeout(r, 50));
+  }
+  const results = w.__results || [];
+  const error = w.__testError || (w.__testDone ? null : 'tempo esgotado esperando os testes rodarem');
+  document.body.removeChild(iframe);
+  render(results, error);
+}
+
+run().catch(err => {
+  document.getElementById('summary').className = 'fail';
+  document.getElementById('summary').textContent = 'Erro ao rodar os testes: ' + err.message;
+  console.error(err);
+});
+</script>
+</body>
+</html>

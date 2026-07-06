@@ -19,8 +19,8 @@ while ($listener.IsListening) {
             default { 'application/octet-stream' }
         }
         $bytes = [System.IO.File]::ReadAllBytes($file)
-        $resp.ContentType   = $mime
-        $resp.ContentLength64 = $bytes.Length
+        $resp.ContentType  = $mime
+        $resp.SendChunked  = $true
         $resp.OutputStream.Write($bytes, 0, $bytes.Length)
     } else {
         $resp.StatusCode = 404
