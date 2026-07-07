@@ -2083,13 +2083,14 @@ document.addEventListener('click', e => {
   if (memsColsOpen && !e.target.closest('.col-picker')) { memsColsOpen = false; renderMems(); }
 });
 
-// Toggle "considerar só consumo real": por padrão (false) a cobertura/alertas usam o
-// pior caso (max entre forecast e consumo real); ligado, ignora o forecast por
-// completo — usado só pra decidir o que a coluna Cobertura/alertas enxergam, não
-// apaga os dados de forecast já importados.
-const MEMS_REALONLY_KEY = 'pcp_mems_realonly_v1';
-let memsRealOnly = loadJSON(MEMS_REALONLY_KEY, false);
-function saveMemsRealOnly() { saveJSON(MEMS_REALONLY_KEY, memsRealOnly); }
+// Toggle "considerar forecast na análise": por padrão (false) tudo usa o consumo
+// médio REAL medido; ligado, passa a usar só a média do forecast — usado só pra
+// decidir o que a coluna Cobertura/alertas/status enxergam, não apaga nenhum
+// dado já importado (real ou forecast).
+const MEMS_USEFORECAST_KEY = 'pcp_mems_useforecast_v1';
+removeOldVersions('pcp_mems_realonly_v', null); // limpa o toggle antigo (semântica invertida, não reaproveitar valor)
+let memsUseForecast = loadJSON(MEMS_USEFORECAST_KEY, false);
+function saveMemsUseForecast() { saveJSON(MEMS_USEFORECAST_KEY, memsUseForecast); }
 
 let pendingMemsConsumo  = null; // consumo real import (Cobertura Excel)
 let pendingMemsForecast = null; // forecast import (Cobertura Excel)
@@ -2165,11 +2166,11 @@ function memsForecastWorstCase(item) {
   return Math.max(item.avgConsumption || 0, item.avgForecast || 0);
 }
 // Consumo "efetivo" usado em toda conta de cobertura/alerta de materiais. Por
-// padrão é o pior caso (forecast x real); com o toggle memsRealOnly ligado, ignora
-// o forecast e usa só o consumo real medido — ver o campo "Considerar só consumo
-// real" na barra de filtros do Controle de Matérias.
+// padrão usa o consumo real medido; com o toggle memsUseForecast ligado, passa a
+// usar só a média do forecast — ver o campo "Considerar Forecast na análise" na
+// barra de filtros do Controle de Matérias.
 function memsEffectiveConsumption(item) {
-  return memsRealOnly ? (item.avgConsumption || 0) : memsForecastWorstCase(item);
+  return memsUseForecast ? (item.avgForecast || 0) : (item.avgConsumption || 0);
 }
 
 /* ── Estrutura de produtos (cobertura em cadeia) ──────────────────────────
@@ -2380,8 +2381,8 @@ function memsStatus(item) {
   return STATUS.CRIT;
 }
 // Cobertura única: em cadeia quando o item é consumido por algum produto,
-// senão baseada só no consumo próprio. O consumo usado é o "efetivo" (pior caso
-// forecast x real, ou só real com o toggle memsRealOnly ligado).
+// senão baseada só no consumo próprio. O consumo usado é o "efetivo" (real por
+// padrão, ou só forecast com o toggle memsUseForecast ligado).
 function memsCoverage(item) {
   const cons = memsEffectiveConsumption(item);
   if (cons === 0) return Infinity;
@@ -2395,8 +2396,8 @@ function memsOwnCoverage(item) {
   return (item.stock || 0) / cons;
 }
 // Cobertura Pior Caso: SEMPRE usa o pior caso (forecast x real), independente do
-// toggle memsRealOnly — é a referência conservadora permanente; por isso a coluna
-// fica escondida (não o cálculo) quando o toggle "só consumo real" está ligado.
+// toggle memsUseForecast — é a referência conservadora permanente, só aparece no
+// export (CSV), não como coluna da tabela.
 function memsWorstCoverage(item) {
   const wc = memsForecastWorstCase(item);
   if (wc === 0) return Infinity;
@@ -2475,9 +2476,11 @@ function exportMemsCSV(items) {
 }
 
 function renderMems() {
-  // Com "só consumo real" ligado, forecast e pior caso somem da tela (a cobertura
-  // já ignora o forecast no cálculo — ver memsEffectiveConsumption/memsCoverage).
-  const vis = k => memsVisibleCols.has(k) && !(memsRealOnly && k === 'forecast');
+  // Esconde da tabela o lado (real x forecast) que não está sendo usado no cálculo
+  // efetivo — ver memsEffectiveConsumption/memsCoverage.
+  const vis = k => memsVisibleCols.has(k)
+    && !(!memsUseForecast && k === 'forecast')
+    && !(memsUseForecast && k === 'consumo');
   const filtered = memsItems.filter(item => {
     if (memsFilters.type     && item.type !== memsFilters.type)          return false;
     if (memsFilters.family   && item.family !== memsFilters.family)      return false;
@@ -2583,9 +2586,9 @@ function renderMems() {
             ${MEMS_COLUMNS.map(c => `<label><input type="checkbox" data-colkey="${c.key}" ${memsVisibleCols.has(c.key) ? 'checked' : ''}> ${c.label}</label>`).join('')}
           </div>` : ''}
         </div>
-        <label class="filter-toggle" title="Ignora o forecast: cobertura, alertas e status passam a usar só o consumo real medido">
-          <input type="checkbox" id="mems-realonly" ${memsRealOnly ? 'checked' : ''}>
-          Desconsiderar Forecast
+        <label class="filter-toggle" title="Por padrão, cobertura/alertas/status usam o consumo real medido. Ligado, passam a usar só a média do forecast">
+          <input type="checkbox" id="mems-useforecast" ${memsUseForecast ? 'checked' : ''}>
+          Considerar Forecast na análise
         </label>
         <label class="filter-toggle" title="Esconde itens sem estoque e sem consumo/forecast — sem giro nenhum">
           <input type="checkbox" id="mems-hide-nogiro" ${memsFilters.hideNoGiro ? 'checked' : ''}>
@@ -2701,9 +2704,9 @@ function renderMems() {
       saveMemsVisibleCols(); renderMems();
     });
   });
-  document.getElementById('mems-realonly')?.addEventListener('change', e => {
-    memsRealOnly = e.target.checked;
-    saveMemsRealOnly();
+  document.getElementById('mems-useforecast')?.addEventListener('change', e => {
+    memsUseForecast = e.target.checked;
+    saveMemsUseForecast();
     renderMems();
   });
   document.getElementById('mems-hide-nogiro')?.addEventListener('change', e => {
