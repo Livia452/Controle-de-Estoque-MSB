@@ -2476,11 +2476,11 @@ function exportMemsCSV(items) {
 }
 
 function renderMems() {
-  // Esconde da tabela o lado (real x forecast) que não está sendo usado no cálculo
-  // efetivo — ver memsEffectiveConsumption/memsCoverage.
-  const vis = k => memsVisibleCols.has(k)
-    && !(!memsUseForecast && k === 'forecast')
-    && !(memsUseForecast && k === 'consumo');
+  // Visibilidade da coluna é só o que está marcado em "Colunas" — independente
+  // de qual lado (real x forecast) está sendo usado no cálculo efetivo (ver
+  // memsEffectiveConsumption/memsCoverage). Quem decide o que aparece é o
+  // seletor de colunas, não o toggle de cálculo.
+  const vis = k => memsVisibleCols.has(k);
   const filtered = memsItems.filter(item => {
     if (memsFilters.type     && item.type !== memsFilters.type)          return false;
     if (memsFilters.family   && item.family !== memsFilters.family)      return false;
