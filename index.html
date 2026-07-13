@@ -495,13 +495,15 @@ const COL_SALES = {
 /* ═══════════════════════════════════════════════
    MONTH UTILITIES
 ═══════════════════════════════════════════════ */
-function getLast6Keys() {
+// Janela de N meses PARA TRÁS, terminando no mês atual (não incluso).
+function getLastNKeys(n) {
   const now = new Date();
-  return Array.from({length: 6}, (_, i) => {
-    const d = new Date(now.getFullYear(), now.getMonth() - 6 + i, 1);
+  return Array.from({length: n}, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - n + i, 1);
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
   });
 }
+function getLast6Keys() { return getLastNKeys(6); }
 // Janela de 6 meses PRA FRENTE, começando no mês atual — usada pelo forecast
 // (que é prospectivo), ao contrário de getLast6Keys (retrospectiva, usada pelo
 // consumo real medido).
@@ -2134,10 +2136,13 @@ async function saveMemsBomStock() {
   if (error) showToast('Erro ao salvar estoque da estrutura: ' + error.message, 'err');
 }
 
-// Consumo mensal (últimos 6 meses) a partir do histórico importado da planilha bruta do Dynamics
+// Consumo mensal (último ano) a partir do histórico importado da planilha bruta do Dynamics.
+// MP/ME/MS passaram a importar 12 meses de consumo (antes eram 6) — PA continua em 6
+// meses (getLast6Keys), são janelas independentes.
+const MEMS_CONSUMO_MONTHS = 12;
 function memsGetMonthlyConsumo(item) {
   const ch = item.consumoHistory || {};
-  return getLast6Keys().map(k => ch[k] || 0);
+  return getLastNKeys(MEMS_CONSUMO_MONTHS).map(k => ch[k] || 0);
 }
 // Espera um MATERIAL (item.consumoHistory) — para PRODUTO ACABADO (PA) use
 // avgConsumption(p), que lê p.salesHistory. Usada só na importação de consumo pra
@@ -2815,7 +2820,7 @@ function renderCoveragePreview(prevId, imported, filename) {
 // ── CONSUMO (Média Real, Pior Caso) ───────────────────────────────────────
 function renderMemsConsumoBody(body) {
   body.innerHTML = `
-    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de cobertura da PCP (<strong>Média Real</strong>, <strong>Pior Caso</strong> nas abas MP / ME e MS) <strong>ou</strong> a planilha bruta de movimentação do Dynamics (colunas Número do item, Data física, Saída, Recebimento, Quantidade) — nesse caso calculamos a média dos últimos 6 meses automaticamente.</div>
+    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de cobertura da PCP (<strong>Média Real</strong>, <strong>Pior Caso</strong> nas abas MP / ME e MS) <strong>ou</strong> a planilha bruta de movimentação do Dynamics (colunas Número do item, Data física, Saída, Recebimento, Quantidade) — nesse caso, exporte o intervalo de <strong>1 ano</strong>: calculamos a média dos últimos 12 meses automaticamente.</div>
     <div class="drop-zone" id="mems-consumo-drop">
       <i class="ti ti-cloud-upload" style="font-size:28px;color:var(--hint)"></i>
       <p style="margin:6px 0 2px;font-size:13px">Arraste o arquivo aqui ou clique para selecionar</p>
@@ -3584,7 +3589,7 @@ function openSalesModal(code) {
 function openMemsConsumoModal(code) {
   const item = memsItems.find(i => i.code.toUpperCase() === String(code).toUpperCase());
   if (!item) return;
-  const keys    = getLast6Keys();
+  const keys    = getLastNKeys(MEMS_CONSUMO_MONTHS);
   const consumo = keys.map(k => ({ month: fmtMonthKey(k), qty: item.consumoHistory?.[k] || 0 }));
   const total   = consumo.reduce((s,r) => s+r.qty, 0);
   const avg     = memsAvgConsumption(item);
@@ -3604,7 +3609,7 @@ function openMemsConsumoModal(code) {
     <p style="font-size:13px;color:var(--muted);margin-bottom:16px">${item.desc}</p>
     ${bars}
     <div style="display:flex;gap:24px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:13px">
-      <div><span style="color:var(--muted)">Total 6 meses:</span> <strong>${fmt.int(total)} un</strong></div>
+      <div><span style="color:var(--muted)">Total 12 meses:</span> <strong>${fmt.int(total)} un</strong></div>
       <div><span style="color:var(--muted)">Consumo médio:</span> <strong>${fmt.int(avg)} un/mês</strong></div>
       <div><span style="color:var(--muted)">Cobertura atual:</span> <strong>${fmt.cov(memsCoverage(item))}</strong></div>
     </div>
