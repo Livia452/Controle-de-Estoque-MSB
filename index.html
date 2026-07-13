@@ -2139,7 +2139,7 @@ async function saveMemsBomStock() {
 // Consumo mensal (último ano) a partir do histórico importado da planilha bruta do Dynamics.
 // MP/ME/MS passaram a importar 12 meses de consumo (antes eram 6) — PA continua em 6
 // meses (getLast6Keys), são janelas independentes.
-const MEMS_CONSUMO_MONTHS = 12;
+const MEMS_CONSUMO_MONTHS = 6;
 function memsGetMonthlyConsumo(item) {
   const ch = item.consumoHistory || {};
   return getLastNKeys(MEMS_CONSUMO_MONTHS).map(k => ch[k] || 0);
@@ -2820,7 +2820,7 @@ function renderCoveragePreview(prevId, imported, filename) {
 // ── CONSUMO (Média Real, Pior Caso) ───────────────────────────────────────
 function renderMemsConsumoBody(body) {
   body.innerHTML = `
-    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de cobertura da PCP (<strong>Média Real</strong>, <strong>Pior Caso</strong> nas abas MP / ME e MS) <strong>ou</strong> a planilha bruta de movimentação do Dynamics (colunas Número do item, Data física, Saída, Recebimento, Quantidade) — nesse caso, exporte o intervalo de <strong>1 ano</strong>: calculamos a média dos últimos 12 meses automaticamente.</div>
+    <div class="import-card-sub" style="margin-top:0">Selecione a planilha de cobertura da PCP (<strong>Média Real</strong>, <strong>Pior Caso</strong> nas abas MP / ME e MS) <strong>ou</strong> a planilha bruta de movimentação do Dynamics (colunas Número do item, Data física, Saída, Recebimento, Quantidade) — nesse caso calculamos a média dos últimos 6 meses automaticamente.</div>
     <div class="drop-zone" id="mems-consumo-drop">
       <i class="ti ti-cloud-upload" style="font-size:28px;color:var(--hint)"></i>
       <p style="margin:6px 0 2px;font-size:13px">Arraste o arquivo aqui ou clique para selecionar</p>
@@ -3609,7 +3609,7 @@ function openMemsConsumoModal(code) {
     <p style="font-size:13px;color:var(--muted);margin-bottom:16px">${item.desc}</p>
     ${bars}
     <div style="display:flex;gap:24px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);font-size:13px">
-      <div><span style="color:var(--muted)">Total 12 meses:</span> <strong>${fmt.int(total)} un</strong></div>
+      <div><span style="color:var(--muted)">Total 6 meses:</span> <strong>${fmt.int(total)} un</strong></div>
       <div><span style="color:var(--muted)">Consumo médio:</span> <strong>${fmt.int(avg)} un/mês</strong></div>
       <div><span style="color:var(--muted)">Cobertura atual:</span> <strong>${fmt.cov(memsCoverage(item))}</strong></div>
     </div>
