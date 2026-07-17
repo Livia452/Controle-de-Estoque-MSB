@@ -20,6 +20,7 @@ while ($listener.IsListening) {
         }
         $bytes = [System.IO.File]::ReadAllBytes($file)
         $resp.ContentType  = $mime
+        $resp.Headers.Add('Cache-Control', 'no-store, no-cache, must-revalidate')
         $resp.SendChunked  = $true
         $resp.OutputStream.Write($bytes, 0, $bytes.Length)
     } else {

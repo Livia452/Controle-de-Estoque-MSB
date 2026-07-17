@@ -783,7 +783,7 @@ const storage = {
   async save(products) {
     if (!products.length) return;
     const { error } = await sb.from('pa_products').upsert(products.map(paProductToRow));
-    if (error) showToast('Erro ao salvar produto: ' + error.message, 'err');
+    if (error) throw new Error(error.message || JSON.stringify(error));
   },
   async remove(code) {
     const { error } = await sb.from('pa_products').delete().eq('code', code);
@@ -828,14 +828,16 @@ const state = (() => {
     },
 
     async applyStockImport(items) {
-      const touched = [];
+      // Snapshot completo: zera tudo primeiro (arquivo Dynamics é posição atual)
+      // Produtos ausentes no arquivo têm estoque 0
+      if (items.length > 0) products.forEach(p => { p.stock = 0; });
       for (const item of items) {
         const code = String(item.code).toUpperCase().trim();
         const existing = products.find(p => p.code === code);
-        if (existing) { existing.stock = Math.max(0, Math.round(item.stock)); touched.push(existing); }
+        if (existing) existing.stock = Math.max(0, Math.round(item.stock));
       }
       notify();
-      await storage.save(touched);
+      await storage.save(products);
     },
 
     async applyStockSAImport(items) {
@@ -1560,31 +1562,34 @@ function cancelStockImport() {
   if (fi) fi.value = '';
 }
 
-function applyStockImport() {
+async function applyStockImport() {
   if (!pendingStock) return;
-  showLoading('Atualizando estoque…');
-  setTimeout(() => {
+  if (!isLoggedIn()) { showToast('Faça login antes de importar o estoque.', 'err'); return; }
+  showLoading('Salvando estoque…');
+  try {
     const { paItems, saItems, memsMatched, bomMatched = [] } = pendingStock;
-    if (paItems.length) state.applyStockImport(paItems);
-    if (saItems.length) state.applyStockSAImport(saItems);
+    if (paItems.length) await state.applyStockImport(paItems);
+    if (saItems.length) await state.applyStockSAImport(saItems);
     if (memsMatched.length) {
       memsItems.forEach(i => { i.stock = 0; });
       memsMatched.forEach(item => {
         const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
         if (existing) existing.stock = Math.max(0, Math.round(item.stock));
       });
-      saveMemsItems();
+      await saveMemsItems();
       memsMeta.stockUpdatedAt = new Date().toISOString();
-      saveMemsMeta();
+      await saveMemsMeta();
     }
-    // Snapshot completo: zera e regrava o estoque dos nós da estrutura (PIs etc.)
     memsBomStock = {};
     bomMatched.forEach(item => { memsBomStock[item.code] = Math.max(0, Math.round(item.stock)); });
-    saveMemsBomStock();
-    hideLoading();
+    await saveMemsBomStock();
     showToast(`Estoque atualizado: ${paItems.length} PA · ${saItems.length} SA · ${memsMatched.length} materiais${bomMatched.length ? ` · ${bomMatched.length} estrutura` : ''}`);
     cancelStockImport();
-  }, 0);
+  } catch(err) {
+    showToast('Erro ao salvar estoque: ' + err.message, 'err');
+  } finally {
+    hideLoading();
+  }
 }
 
 /* ── Sales import handlers ── */
