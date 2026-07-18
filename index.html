@@ -3491,9 +3491,14 @@ function lotCrit(days) {
   if (days < 180) return 'atencao';
   return 'monitorar';
 }
-// Janela da aba: até 12 meses à frente (inclui vencidos — pior caso possível)
+// Janela da aba: até 12 meses à frente (inclui vencidos — pior caso possível).
+// Só entra o lote que satisfaz as DUAS condições (E):
+//   1) o código é de um produto acabado (PA) cadastrado — ignora lote de
+//      material/PI que porventura tenha vindo no arquivo;
+//   2) tem quantidade em estoque (qty > 0) — lote já consumido não gera alerta.
 function lotsInWindow() {
   return paLots
+    .filter(l => (l.qty || 0) > 0 && state.getByCode(l.code) != null)
     .map(l => ({ ...l, days: lotDaysLeft(l.expiry) }))
     .filter(l => l.days != null && l.days <= 365);
 }
