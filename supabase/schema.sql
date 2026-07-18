@@ -79,6 +79,18 @@ create table if not exists pa_lots (
 create index if not exists pa_lots_code_idx   on pa_lots (code);
 create index if not exists pa_lots_expiry_idx on pa_lots (expiry);
 
+-- ── SALDO POR LOTE (vem da importação de estoque, cruzado com pa_lots) ──
+-- A planilha de validade dá código+lote+validade; a de estoque dá o saldo
+-- atual de cada lote. A aba Alertas cruza os dois por (código + lote).
+-- Snapshot: cada importação de estoque substitui a tabela inteira.
+create table if not exists pa_lot_stock (
+  code       text not null,
+  lot        text not null,
+  qty        numeric not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (code, lot)
+);
+
 -- ── USUÁRIOS / PAPÉIS ──────────────────────────────────────────────────
 -- ligada ao login do Supabase (auth.users); role controla quem vê "Gerenciar usuários"
 create table if not exists profiles (
@@ -94,6 +106,7 @@ create table if not exists profiles (
 -- pra qualquer cliente (só a função serverless, com service_role, escreve).
 -- ═══════════════════════════════════════════════════════════════════════
 alter table pa_lots             enable row level security;
+alter table pa_lot_stock        enable row level security;
 alter table pa_products         enable row level security;
 alter table materials           enable row level security;
 alter table materials_meta      enable row level security;
@@ -105,6 +118,12 @@ drop policy if exists pa_lots_read  on pa_lots;
 drop policy if exists pa_lots_write on pa_lots;
 create policy pa_lots_read  on pa_lots for select using (true);
 create policy pa_lots_write on pa_lots for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+drop policy if exists pa_lot_stock_read  on pa_lot_stock;
+drop policy if exists pa_lot_stock_write on pa_lot_stock;
+create policy pa_lot_stock_read  on pa_lot_stock for select using (true);
+create policy pa_lot_stock_write on pa_lot_stock for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists pa_products_read  on pa_products;
