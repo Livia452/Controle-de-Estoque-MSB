@@ -247,6 +247,9 @@ tbody tr:hover td{background:var(--bg)}
       <button class="tab-btn" role="tab" data-tab="mems" aria-selected="false">
         <i class="ti ti-package" aria-hidden="true"></i> Controle de Matérias
       </button>
+      <button class="tab-btn" role="tab" data-tab="alertas" aria-selected="false">
+        <i class="ti ti-alert-triangle" aria-hidden="true"></i> Alertas de Estoque
+      </button>
       <button class="tab-btn" role="tab" data-tab="editor" aria-selected="false">
         <i class="ti ti-edit" aria-hidden="true"></i> Atualizar estoque (PCP)
       </button>
@@ -256,6 +259,7 @@ tbody tr:hover td{background:var(--bg)}
   <div id="view-dashboard" class="view active" role="tabpanel"></div>
   <div id="view-editor"    class="view"        role="tabpanel"></div>
   <div id="view-mems"      class="view"        role="tabpanel"></div>
+  <div id="view-alertas"   class="view"        role="tabpanel"></div>
 </div>
 <div class="toast" id="toast" aria-live="assertive"></div>
 <div class="modal-overlay" id="loading-overlay" style="display:none" role="alert" aria-live="assertive">
@@ -1391,6 +1395,34 @@ function renderEditor() {
             </div>
           </div>
         </div>
+
+        <!-- Lots/expiry import -->
+        <div class="import-card">
+          <p class="import-card-title"><i class="ti ti-calendar-due" aria-hidden="true"></i> Importar validade (lotes)</p>
+          <p class="import-card-sub">Lotes de PA com data de validade · cada importação substitui a lista anterior · alimenta a aba Alertas de Estoque</p>
+          <div class="drop-zone" id="dz-lots">
+            <input type="file" id="fi-lots" accept=".xlsx,.xls,.csv" aria-label="Selecionar arquivo de lotes com validade">
+            <div class="drop-zone-icon"><i class="ti ti-file-spreadsheet" aria-hidden="true"></i></div>
+            <p class="drop-zone-text">Arraste o arquivo ou clique para selecionar</p>
+            <p class="drop-zone-hint">.xlsx · .xls · .csv</p>
+          </div>
+          <div class="import-preview" id="prev-lots">
+            <p class="import-info" id="prev-lots-info"></p>
+            <div class="preview-tbl-wrap">
+              <table class="preview-tbl">
+                <thead><tr><th>Código</th><th>Lote</th><th style="text-align:right">Qtd</th><th>Validade</th></tr></thead>
+                <tbody id="prev-lots-body"></tbody>
+              </table>
+            </div>
+            <div class="preview-actions">
+              <span class="preview-count" id="prev-lots-count"></span>
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-sm btn-ghost" id="btn-lots-cancel">Cancelar</button>
+                <button class="btn btn-sm btn-primary" id="btn-lots-apply"><i class="ti ti-check" aria-hidden="true"></i> Aplicar</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="divider"></div>
@@ -1465,6 +1497,12 @@ function bindEditorEvents() {
   document.getElementById('btn-sales-cancel')?.addEventListener('click', cancelSalesImport);
   document.getElementById('btn-sales-apply')?.addEventListener('click', applySalesImport);
   setupDragDrop('dz-sales', 'fi-sales');
+
+  // Lots/expiry import
+  document.getElementById('fi-lots')?.addEventListener('change', e => handleLotsFile(e.target.files[0]));
+  document.getElementById('btn-lots-cancel')?.addEventListener('click', cancelLotsImport);
+  document.getElementById('btn-lots-apply')?.addEventListener('click', applyLotsImport);
+  setupDragDrop('dz-lots', 'fi-lots');
 }
 
 function setupDragDrop(dzId, fiId) {
@@ -1477,8 +1515,9 @@ function setupDragDrop(dzId, fiId) {
     e.preventDefault(); dz.classList.remove('drag-over');
     const file = e.dataTransfer?.files[0];
     if (!file) return;
-    if (fiId === 'fi-stock') handleStockFile(file);
-    else                     handleSalesFile(file);
+    if (fiId === 'fi-stock')      handleStockFile(file);
+    else if (fiId === 'fi-lots')  handleLotsFile(file);
+    else                          handleSalesFile(file);
   });
 }
 
@@ -1721,14 +1760,16 @@ function switchTab(tab) {
   });
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById('view-'+tab).classList.add('active');
-  if (tab === 'dashboard') renderDashboard();
-  else if (tab === 'mems') renderMems();
-  else                     renderEditor();
+  if (tab === 'dashboard')     renderDashboard();
+  else if (tab === 'mems')     renderMems();
+  else if (tab === 'alertas')  renderAlertas();
+  else                         renderEditor();
 }
 
 document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
 state.subscribe(() => {
-  if (activeTab === 'dashboard') renderDashboard();
+  if (activeTab === 'dashboard')     renderDashboard();
+  else if (activeTab === 'alertas')  renderAlertas();
   else renderProductList();
 });
 
@@ -3396,6 +3437,418 @@ async function runLocalMigration() {
   }
 }
 
+/* ═══════════════════════════════════════════════
+   ALERTAS DE ESTOQUE — validade de lotes + slow moving
+   Aba nova ao lado do Painel de indicadores (que não muda em nada):
+   - Validade: lotes de PA vencendo nos próximos 12 meses (importados via
+     card "Importar validade (lotes)"; snapshot — cada import substitui tudo)
+   - Slow moving: calculado dos dados que já existem (vendas 6m × 2 ÷ estoque
+     = giro anualizado); nada novo pra importar
+═══════════════════════════════════════════════ */
+const alertasEl = document.getElementById('view-alertas');
+let paLots = [];            // [{ code, lot, qty, expiry: 'YYYY-MM-DD', updatedAt }]
+let pendingLots = null;     // importação em andamento
+let alertasTab = 'validade';
+let alertasFilters = { search: '', family: '', crit: '' };
+
+async function loadPaLots() {
+  const { data, error } = await sb.from('pa_lots').select('code,lot,qty,expiry,updated_at');
+  if (error) {
+    // tabela pode ainda não existir no Supabase (schema.sql desatualizado) — não trava o boot
+    console.warn('pa_lots indisponível:', error.message);
+    return [];
+  }
+  return data.map(r => ({ code: r.code, lot: r.lot, qty: r.qty, expiry: r.expiry, updatedAt: r.updated_at }));
+}
+async function savePaLots() {
+  const { error: delErr } = await sb.from('pa_lots').delete().neq('code', '');
+  if (delErr) { showToast('Erro ao salvar lotes: ' + delErr.message, 'err'); return false; }
+  if (!paLots.length) return true;
+  const now = new Date().toISOString();
+  const { error } = await sb.from('pa_lots').insert(
+    paLots.map(l => ({ code: l.code, lot: l.lot || '', qty: l.qty || 0, expiry: l.expiry, updated_at: now }))
+  );
+  if (error) { showToast('Erro ao salvar lotes: ' + error.message, 'err'); return false; }
+  return true;
+}
+
+/* ── Regras de criticidade (por lote, dias até vencer) ── */
+function lotDaysLeft(expiry) {
+  const d = expiry ? new Date(expiry + 'T00:00:00') : null;
+  if (!d || isNaN(d)) return null;
+  return Math.ceil((d - new Date().setHours(0, 0, 0, 0)) / 86400000);
+}
+const LOT_CRIT = {
+  vencido:  { label: 'Vencido',  cls: 'b-crit', order: 0 },
+  critico:  { label: 'Crítico',  cls: 'b-crit', order: 1 },
+  atencao:  { label: 'Atenção',  cls: 'b-warn', order: 2 },
+  monitorar:{ label: 'Monitorar',cls: 'b-high', order: 3 },
+};
+function lotCrit(days) {
+  if (days == null) return null;
+  if (days < 0)   return 'vencido';
+  if (days < 90)  return 'critico';
+  if (days < 180) return 'atencao';
+  return 'monitorar';
+}
+// Janela da aba: até 12 meses à frente (inclui vencidos — pior caso possível)
+function lotsInWindow() {
+  return paLots
+    .map(l => ({ ...l, days: lotDaysLeft(l.expiry) }))
+    .filter(l => l.days != null && l.days <= 365);
+}
+
+/* ── Slow moving (calculado, PA) ──────────────────────────────────────────
+   Giro anualizado = (vendas dos últimos 6 meses × 2) ÷ estoque atual.
+   Regra (da proposta de design): giro < 2x/ano = giro baixo · < 1x = sem giro.
+   Só considera itens COM estoque (sem estoque não há capital imobilizado). */
+const SLOW_GIRO_LIMIT = 2;
+function paAnnualTurnover(p) {
+  const stock = p.stock || 0;
+  if (stock <= 0) return null;
+  const sales6m = getMonthlySales(p).reduce((a, b) => a + b, 0);
+  return (sales6m * 2) / stock;
+}
+function paLastSaleMonth(p) {
+  const sh = p.salesHistory || {};
+  const keys = Object.keys(sh).filter(k => (sh[k] || 0) > 0).sort();
+  return keys.length ? keys[keys.length - 1] : null;
+}
+function slowMovingRows() {
+  return state.getAll()
+    .map(p => ({ p, giro: paAnnualTurnover(p) }))
+    .filter(x => x.giro != null && x.giro < SLOW_GIRO_LIMIT)
+    .sort((a, b) => a.giro - b.giro);
+}
+
+/* ── Render da aba ── */
+function renderAlertas() {
+  if (!alertasEl) return;
+  const lots     = lotsInWindow();
+  const slowAll  = slowMovingRows();
+  const products = new Map(state.getAll().map(p => [p.code.toUpperCase(), p]));
+  const families = [...new Set(state.getAll().map(p => p.family).filter(Boolean))].sort();
+
+  const criticos   = lots.filter(l => l.days < 90);
+  const critUnits  = criticos.reduce((s, l) => s + (l.qty || 0), 0);
+  const lotsUnits  = lots.reduce((s, l) => s + (l.qty || 0), 0);
+  const slowUnits  = slowAll.reduce((s, x) => s + (x.p.stock || 0), 0);
+  const lastUpdate = paLots.length ? paLots.reduce((m, l) => l.updatedAt > m ? l.updatedAt : m, '') : null;
+
+  const isVal = alertasTab === 'validade';
+  const q = alertasFilters.search.trim().toLowerCase();
+
+  const valRows = lots
+    .filter(l => {
+      const p = products.get(l.code.toUpperCase());
+      if (alertasFilters.family && (p?.family || '') !== alertasFilters.family) return false;
+      if (alertasFilters.crit && lotCrit(l.days) !== alertasFilters.crit) return false;
+      if (q) return l.code.toLowerCase().includes(q) || (l.lot || '').toLowerCase().includes(q)
+                 || (p?.description || '').toLowerCase().includes(q);
+      return true;
+    })
+    .sort((a, b) => a.days - b.days);
+
+  const slowRows = slowAll.filter(({ p }) => {
+    if (alertasFilters.family && (p.family || '') !== alertasFilters.family) return false;
+    if (q) return p.code.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q);
+    return true;
+  });
+
+  alertasEl.innerHTML = `
+    <div style="max-width:1100px;margin:0 auto">
+      <div class="dashboard-header">
+        <div>
+          <h1 class="page-title">Alertas de Estoque</h1>
+          <p class="last-update">Validade de lotes e giro baixo — produto acabado</p>
+          ${lastUpdate ? `<p class="last-update">lotes atualizados em ${new Date(lastUpdate).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })}</p>` : ''}
+          ${!paLots.length ? `<p class="last-update">Importe os lotes com validade na aba <strong>Atualizar estoque (PCP)</strong> → Importar validade (lotes)</p>` : ''}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-ghost" id="btn-alertas-export"><i class="ti ti-download"></i> Exportar CSV (${isVal ? 'validade' : 'slow moving'})</button>
+        </div>
+      </div>
+
+      <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr))">
+        <div class="kpi" style="${criticos.length ? 'border-color:var(--danger-text)' : ''}">
+          <div class="kpi-label">🔴 Lotes críticos</div>
+          <div class="kpi-value ${criticos.length ? 'text-danger' : ''}">${criticos.length}</div>
+          <div class="kpi-sub">vencido ou &lt; 3 meses · ${fmt.int(critUnits)} un</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">📅 Vencendo em 12 meses</div>
+          <div class="kpi-value">${lots.length}</div>
+          <div class="kpi-sub">${fmt.int(lotsUnits)} unidades no total</div>
+        </div>
+        <div class="kpi" style="${slowAll.length ? 'border-color:var(--warn-text)' : ''}">
+          <div class="kpi-label">🐌 Itens slow moving</div>
+          <div class="kpi-value ${slowAll.length ? 'text-warn' : ''}">${slowAll.length}</div>
+          <div class="kpi-sub">giro abaixo de ${SLOW_GIRO_LIMIT}x/ano</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">📦 Unidades paradas</div>
+          <div class="kpi-value">${fmt.int(slowUnits)}</div>
+          <div class="kpi-sub">estoque em itens slow moving</div>
+        </div>
+      </div>
+
+      <div class="chart-view-tabs" style="margin-bottom:16px">
+        <button class="chart-view-btn ${isVal ? 'active' : ''}" data-alertas-tab="validade">Produtos com validade próxima <span style="opacity:.65">${lots.length}</span></button>
+        <button class="chart-view-btn ${!isVal ? 'active' : ''}" data-alertas-tab="slow">Slow moving <span style="opacity:.65">${slowAll.length}</span></button>
+      </div>
+
+      <div class="filter-bar">
+        <div class="filter-search">
+          <i class="ti ti-search"></i>
+          <input id="alertas-search" type="text" placeholder="${isVal ? 'Buscar produto, código ou lote…' : 'Buscar produto ou código…'}" value="${alertasFilters.search}">
+        </div>
+        <select class="filter-select" id="alertas-family">
+          <option value="">Todas as famílias</option>
+          ${families.map(f => `<option value="${f}" ${alertasFilters.family === f ? 'selected' : ''}>${f}</option>`).join('')}
+        </select>
+        ${isVal ? `
+        <select class="filter-select" id="alertas-crit">
+          <option value="">Toda criticidade</option>
+          <option value="vencido"   ${alertasFilters.crit === 'vencido'   ? 'selected' : ''}>Vencido</option>
+          <option value="critico"   ${alertasFilters.crit === 'critico'   ? 'selected' : ''}>Crítico (&lt; 3 meses)</option>
+          <option value="atencao"   ${alertasFilters.crit === 'atencao'   ? 'selected' : ''}>Atenção (3–6 meses)</option>
+          <option value="monitorar" ${alertasFilters.crit === 'monitorar' ? 'selected' : ''}>Monitorar (6–12 meses)</option>
+        </select>` : ''}
+        <span class="filter-results">${isVal ? valRows.length : slowRows.length} registros</span>
+      </div>
+
+      ${isVal ? `
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr>
+            <th>Produto</th>
+            <th>Lote</th>
+            <th>Família</th>
+            <th class="num-c">Qtd</th>
+            <th class="num-c">Validade</th>
+            <th class="num-c">Dias rest.</th>
+            <th class="num-c">Criticidade</th>
+          </tr></thead>
+          <tbody>
+            ${!valRows.length ? `<tr><td colspan="7" class="empty">${paLots.length ? 'Nenhum lote encontrado com os filtros aplicados.' : 'Nenhum lote importado ainda.'}</td></tr>` :
+              valRows.map(l => {
+                const p = products.get(l.code.toUpperCase());
+                const ck = lotCrit(l.days), cm = LOT_CRIT[ck];
+                const diasColor = ck === 'vencido' || ck === 'critico' ? 'var(--danger-text)' : ck === 'atencao' ? 'var(--warn-text)' : 'var(--text)';
+                return `<tr>
+                  <td>
+                    <div style="font-weight:500">${p?.description || '—'}</div>
+                    <div style="font-size:12px;color:var(--hint)">${l.code}</div>
+                  </td>
+                  <td style="font-size:12px;color:var(--muted)">${l.lot || '—'}</td>
+                  <td style="font-size:12px;color:var(--muted)">${p?.family || '—'}</td>
+                  <td class="num-c" style="font-weight:500">${fmt.int(l.qty || 0)}</td>
+                  <td class="num-c" style="font-size:12px">${new Date(l.expiry + 'T00:00:00').toLocaleDateString('pt-BR')}</td>
+                  <td class="num-c" style="font-weight:600;color:${diasColor}">${l.days}</td>
+                  <td class="num-c"><span class="badge ${cm.cls}">${cm.label}</span></td>
+                </tr>`;
+              }).join('')}
+          </tbody>
+        </table>
+      </div>
+      <p class="last-update" style="margin-top:8px">Regra: vencido &lt; hoje · crítico &lt; 3 meses · atenção 3–6 meses · monitorar 6–12 meses (por lote) · ordenado por validade mais próxima</p>
+      ` : `
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr>
+            <th>Produto</th>
+            <th>Família</th>
+            <th class="num-c">Estoque</th>
+            <th class="num-c">Giro (12m)</th>
+            <th class="num-c">Cobertura</th>
+            <th class="num-c">Última saída</th>
+            <th class="num-c">Situação</th>
+          </tr></thead>
+          <tbody>
+            ${!slowRows.length ? `<tr><td colspan="7" class="empty">Nenhum item slow moving com os filtros aplicados.</td></tr>` :
+              slowRows.map(({ p, giro }) => {
+                const semGiro = giro < 1;
+                const lastMk = paLastSaleMonth(p);
+                return `<tr>
+                  <td>
+                    <div style="font-weight:500">${p.description}</div>
+                    <div style="font-size:12px;color:var(--hint)">${p.code}</div>
+                  </td>
+                  <td style="font-size:12px;color:var(--muted)">${p.family || '—'}</td>
+                  <td class="num-c" style="font-weight:500">${fmt.int(p.stock || 0)}</td>
+                  <td class="num-c" style="font-weight:600;color:${semGiro ? 'var(--danger-text)' : 'var(--warn-text)'}">${giro.toFixed(1).replace('.', ',')}x</td>
+                  <td class="num-c" style="font-size:12px">${fmt.cov(coverage(p))}</td>
+                  <td class="num-c" style="font-size:12px;color:var(--muted)">${lastMk ? fmtMonthKey(lastMk) : '—'}</td>
+                  <td class="num-c"><span class="badge ${semGiro ? 'b-crit' : 'b-warn'}">${semGiro ? 'Sem giro' : 'Giro baixo'}</span></td>
+                </tr>`;
+              }).join('')}
+          </tbody>
+        </table>
+      </div>
+      <p class="last-update" style="margin-top:8px">Regra: giro anualizado (vendas 6m × 2 ÷ estoque) abaixo de ${SLOW_GIRO_LIMIT}x/ano · "sem giro" quando abaixo de 1x · ordenado por menor giro</p>
+      `}
+    </div>
+  `;
+
+  document.querySelectorAll('[data-alertas-tab]').forEach(btn => {
+    btn.addEventListener('click', () => { alertasTab = btn.dataset.alertasTab; alertasFilters.crit = ''; renderAlertas(); });
+  });
+  let _at;
+  document.getElementById('alertas-search')?.addEventListener('input', e => {
+    clearTimeout(_at); _at = setTimeout(() => { alertasFilters.search = e.target.value; renderAlertas(); }, 220);
+  });
+  document.getElementById('alertas-family')?.addEventListener('change', e => { alertasFilters.family = e.target.value; renderAlertas(); });
+  document.getElementById('alertas-crit')?.addEventListener('change',   e => { alertasFilters.crit   = e.target.value; renderAlertas(); });
+  document.getElementById('btn-alertas-export')?.addEventListener('click', () => {
+    if (alertasTab === 'validade') exportValidadeCSV(valRows, products);
+    else exportSlowMovingCSV(slowRows);
+  });
+}
+
+function exportValidadeCSV(rows, products) {
+  const header = ['Código', 'Descrição', 'Lote', 'Família', 'Qtd', 'Validade', 'Dias restantes', 'Criticidade'];
+  const lines = rows.map(l => {
+    const p = products.get(l.code.toUpperCase());
+    return [l.code, `"${p?.description || ''}"`, l.lot || '', `"${p?.family || ''}"`, l.qty || 0,
+      new Date(l.expiry + 'T00:00:00').toLocaleDateString('pt-BR'), l.days, LOT_CRIT[lotCrit(l.days)].label].join(',');
+  });
+  const csv = [header.join(','), ...lines].join('\n');
+  const a = Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv), download: `validade_lotes_${new Date().toISOString().slice(0, 10)}.csv` });
+  a.click();
+}
+function exportSlowMovingCSV(rows) {
+  const header = ['Código', 'Descrição', 'Família', 'Estoque', 'Giro anualizado', 'Cobertura (m)', 'Última saída', 'Situação'];
+  const lines = rows.map(({ p, giro }) => {
+    const lastMk = paLastSaleMonth(p);
+    const cov = coverage(p);
+    return [p.code, `"${p.description}"`, `"${p.family || ''}"`, p.stock || 0, giro.toFixed(2),
+      Number.isFinite(cov) ? cov.toFixed(1) : '', lastMk ? fmtMonthKey(lastMk) : '', giro < 1 ? 'Sem giro' : 'Giro baixo'].join(',');
+  });
+  const csv = [header.join(','), ...lines].join('\n');
+  const a = Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv), download: `slow_moving_${new Date().toISOString().slice(0, 10)}.csv` });
+  a.click();
+}
+
+/* ── Importação de lotes com validade ─────────────────────────────────────
+   Cabeçalho flexível: procura a linha que tenha colunas de código, lote e
+   validade (nomes variam conforme o relatório do Dynamics). Datas aceitas
+   como célula de data do Excel ou texto dd/mm/aaaa. */
+function parseLotsSheet(ws) {
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const findCol = (header, patterns) => header.findIndex(h => patterns.some(rx => rx.test(String(h).trim().toLowerCase())));
+  let headerRowIdx = -1, iCode = -1, iLot = -1, iExpiry = -1, iQty = -1;
+  for (let r = 0; r < Math.min(rows.length, 20); r++) {
+    const header = rows[r];
+    const c = findCol(header, [/n[úu]mero do item/, /^c[óo]d/, /^item$/, /c[óo]digo/]);
+    const l = findCol(header, [/lote/]);
+    const v = findCol(header, [/valid/, /venc/, /expira/]);
+    if (c !== -1 && l !== -1 && v !== -1) {
+      headerRowIdx = r; iCode = c; iLot = l; iExpiry = v;
+      iQty = findCol(header, [/quant/, /qtd/, /dispon/, /saldo/, /f[íi]sic/]);
+      break;
+    }
+  }
+  if (headerRowIdx === -1) return null;
+  const out = [];
+  for (let r = headerRowIdx + 1; r < rows.length; r++) {
+    const row = rows[r];
+    const code = String(row[iCode] || '').trim().toUpperCase();
+    if (!code) continue;
+    const rawDate = row[iExpiry];
+    const d = rawDate instanceof Date && !isNaN(rawDate) ? rawDate : toDate(rawDate);
+    if (!d || isNaN(d)) continue;
+    const qty = iQty !== -1 ? toNum(row[iQty]) : 0;
+    if (iQty !== -1 && qty <= 0) continue; // lote sem saldo não interessa
+    out.push({
+      code,
+      lot: String(row[iLot] || '').trim(),
+      qty,
+      expiry: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+    });
+  }
+  return out;
+}
+
+async function handleLotsFile(file) {
+  if (!file) return;
+  if (!isLoggedIn()) { showToast('Faça login antes de importar os lotes.', 'err'); return; }
+  showLoading('Lendo arquivo de lotes…');
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+    let rows = null;
+    for (const sheetName of wb.SheetNames) {
+      rows = parseLotsSheet(wb.Sheets[sheetName]);
+      if (rows && rows.length) break;
+    }
+    if (!rows || !rows.length) {
+      showToast('Não encontramos colunas de código, lote e validade nesse arquivo.', 'err');
+      const info = document.getElementById('prev-lots-info');
+      if (info) {
+        document.getElementById('prev-lots').classList.add('visible');
+        info.innerHTML = `<i class="ti ti-alert-circle" aria-hidden="true"></i> Colunas encontradas:<br><span style="font-size:11px;color:var(--hint)">${memsFileHeaderPreview(wb)}</span>`;
+        document.getElementById('prev-lots-body').innerHTML = '';
+        document.getElementById('prev-lots-count').textContent = '';
+      }
+      return;
+    }
+    // agrega por (código + lote + validade) — alguns relatórios repetem o lote por depósito
+    const map = {};
+    rows.forEach(r => {
+      const k = `${r.code}|${r.lot}|${r.expiry}`;
+      if (!map[k]) map[k] = { ...r };
+      else map[k].qty += r.qty;
+    });
+    const items = Object.values(map).sort((a, b) => a.expiry.localeCompare(b.expiry));
+    pendingLots = { items, filename: file.name, totalRows: rows.length };
+    renderLotsPreview();
+  } catch (err) {
+    showToast('Erro ao ler o arquivo: ' + err.message, 'err');
+  } finally {
+    hideLoading();
+  }
+}
+
+function renderLotsPreview() {
+  if (!pendingLots) return;
+  const { items, filename, totalRows } = pendingLots;
+  const prev = document.getElementById('prev-lots');
+  prev.classList.add('visible');
+  document.getElementById('prev-lots-info').innerHTML =
+    `<i class="ti ti-file" aria-hidden="true"></i> <strong>${filename}</strong> · ${totalRows} linhas`;
+  document.getElementById('prev-lots-body').innerHTML = items.slice(0, 50).map(l => `<tr>
+      <td><strong>${l.code}</strong></td>
+      <td style="font-size:11px;color:var(--muted)">${l.lot || '—'}</td>
+      <td style="text-align:right">${fmt.int(l.qty || 0)}</td>
+      <td>${new Date(l.expiry + 'T00:00:00').toLocaleDateString('pt-BR')}</td>
+    </tr>`).join('') + (items.length > 50 ? `<tr><td colspan="4" class="empty">… e mais ${items.length - 50} lotes</td></tr>` : '');
+  document.getElementById('prev-lots-count').textContent =
+    `${items.length} lotes · substitui a lista atual (${paLots.length} lotes)`;
+}
+
+function cancelLotsImport() {
+  pendingLots = null;
+  const prev = document.getElementById('prev-lots');
+  if (prev) prev.classList.remove('visible');
+  const fi = document.getElementById('fi-lots');
+  if (fi) fi.value = '';
+}
+
+async function applyLotsImport() {
+  if (!pendingLots) return;
+  showLoading('Atualizando lotes…');
+  try {
+    const now = new Date().toISOString();
+    paLots = pendingLots.items.map(l => ({ ...l, updatedAt: now }));
+    const ok = await savePaLots();
+    if (ok) showToast(`Lotes atualizados: ${paLots.length} lotes com validade`);
+    cancelLotsImport();
+    if (activeTab === 'alertas') renderAlertas();
+  } finally {
+    hideLoading();
+  }
+}
+
 /* ── Boot ── */
 async function boot() {
   showLoading('Carregando dados…');
@@ -3404,18 +3857,20 @@ async function boot() {
     currentSession = sessionData?.session ?? null;
     await loadCurrentProfile();
 
-    const [products, materials, meta, bom, bomStock] = await Promise.all([
+    const [products, materials, meta, bom, bomStock, lots] = await Promise.all([
       storage.load(),
       loadMemsItems(),
       loadMemsMeta(),
       loadMemsBom(),
       loadMemsBomStock(),
+      loadPaLots(),
     ]);
     state._setAll(products);
     memsItems    = materials;
     memsMeta     = meta;
     memsBom      = bom;
     memsBomStock = bomStock;
+    paLots       = lots;
   } catch (err) {
     showToast('Erro ao carregar dados: ' + err.message, 'err');
   } finally {
@@ -3424,8 +3879,9 @@ async function boot() {
 
   renderNavAuth();
   await offerLocalMigrationIfAny();
-  if (activeTab === 'dashboard') renderDashboard();
-  else if (activeTab === 'mems') renderMems();
+  if (activeTab === 'dashboard')      renderDashboard();
+  else if (activeTab === 'mems')      renderMems();
+  else if (activeTab === 'alertas')   renderAlertas();
   else renderEditor();
 }
 boot();
@@ -3651,7 +4107,7 @@ function openMemsForecastModal(code) {
       <div><span style="color:var(--muted)">Total 6 meses (previsto):</span> <strong>${fmt.int(total)} un</strong></div>
       <div><span style="color:var(--muted)">Forecast médio:</span> <strong>${fmt.int(avg)} un/mês</strong></div>
       <div><span style="color:var(--muted)">Consumo real médio:</span> <strong>${fmt.int(item.avgConsumption||0)} un/mês</strong></div>
-      <div><span style="color:var(--muted)">Pior caso (usado na cobertura):</span> <strong>${fmt.int(memsForecastWorstCase(item))} un/mês</strong></div>
+      <div><span style="color:var(--muted)">Pior caso (maior entre real e forecast):</span> <strong>${fmt.int(memsForecastWorstCase(item))} un/mês</strong></div>
     </div>
     <div class="form-actions" style="margin-top:16px">
       <button class="btn btn-primary" id="btn-modal-cancel">Fechar</button>

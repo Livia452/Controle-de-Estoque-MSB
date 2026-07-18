@@ -66,6 +66,19 @@ create table if not exists materials_bom_stock (
   updated_at timestamptz not null default now()
 );
 
+-- ── LOTES DE PA COM VALIDADE (aba Alertas de Estoque) ─────────────────
+-- Snapshot: cada importação substitui a tabela inteira (igual ao trânsito).
+create table if not exists pa_lots (
+  id         bigint generated always as identity primary key,
+  code       text not null,            -- código do PA
+  lot        text not null default '', -- nº do lote
+  qty        numeric not null default 0,
+  expiry     date,                     -- data de validade do lote
+  updated_at timestamptz not null default now()
+);
+create index if not exists pa_lots_code_idx   on pa_lots (code);
+create index if not exists pa_lots_expiry_idx on pa_lots (expiry);
+
 -- ── USUÁRIOS / PAPÉIS ──────────────────────────────────────────────────
 -- ligada ao login do Supabase (auth.users); role controla quem vê "Gerenciar usuários"
 create table if not exists profiles (
@@ -80,12 +93,19 @@ create table if not exists profiles (
 -- profiles: cada um lê o próprio registro, admin lê todos; escrita bloqueada
 -- pra qualquer cliente (só a função serverless, com service_role, escreve).
 -- ═══════════════════════════════════════════════════════════════════════
+alter table pa_lots             enable row level security;
 alter table pa_products         enable row level security;
 alter table materials           enable row level security;
 alter table materials_meta      enable row level security;
 alter table materials_bom       enable row level security;
 alter table materials_bom_stock enable row level security;
 alter table profiles            enable row level security;
+
+drop policy if exists pa_lots_read  on pa_lots;
+drop policy if exists pa_lots_write on pa_lots;
+create policy pa_lots_read  on pa_lots for select using (true);
+create policy pa_lots_write on pa_lots for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists pa_products_read  on pa_products;
 drop policy if exists pa_products_write on pa_products;

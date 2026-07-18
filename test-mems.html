@@ -183,30 +183,29 @@ try {
     assertEqual('Embarque chegando antes da ruptura do ramo -> sem antecipação', memsNeedsAnticipation(item), false);
   }
 
-  // Caso 10: pior caso = maior entre consumo real e forecast (calculado, não importado)
+  // Caso 10: pior caso = maior entre consumo real e forecast (informativo:
+  // aparece no CSV e no modal de forecast, mas NÃO dirige mais a cobertura)
   {
-    memsRealOnly = false;
     const item1 = mkMemsItem({ avgConsumption: 100, avgForecast: 60 });
     assertClose('Pior caso usa o real quando real > forecast', memsForecastWorstCase(item1), 100, 0.01);
     const item2 = mkMemsItem({ avgConsumption: 40, avgForecast: 90 });
     assertClose('Pior caso usa o forecast quando forecast > real', memsForecastWorstCase(item2), 90, 0.01);
   }
 
-  // Caso 11: por padrão (toggle desligado), a Cobertura usa o pior caso
+  // Caso 11: por padrão (toggle desligado), a Cobertura usa SÓ o consumo real
   {
     memsBom.length = 0; _bomIdx = null;
-    memsRealOnly = false;
+    memsUseForecast = false;
     const item = mkMemsItem({ stock: 90, avgConsumption: 30, avgForecast: 45 });
-    // pior caso = max(30,45)=45 -> cobertura = 90/45 = 2.0m (não 90/30=3.0m)
-    assertClose('Cobertura usa consumo efetivo (pior caso) por padrão', memsCoverage(item), 2.0, 0.01);
+    assertClose('Por padrão a cobertura usa só o consumo real', memsCoverage(item), 3.0, 0.01);
   }
 
-  // Caso 12: com o toggle "só consumo real" ligado, a Cobertura ignora o forecast
+  // Caso 12: com o toggle de forecast ligado, a Cobertura usa SÓ o forecast
   {
-    memsRealOnly = true;
+    memsUseForecast = true;
     const item = mkMemsItem({ stock: 90, avgConsumption: 30, avgForecast: 45 });
-    assertClose('Com toggle ligado, cobertura usa só consumo real', memsCoverage(item), 3.0, 0.01);
-    memsRealOnly = false; // restaura o padrão pros próximos testes/execuções
+    assertClose('Com toggle ligado, cobertura usa só o forecast', memsCoverage(item), 2.0, 0.01);
+    memsUseForecast = false; // restaura o padrão pros próximos testes/execuções
   }
 
   window.__testError = null;
