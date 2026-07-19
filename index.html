@@ -3487,6 +3487,32 @@ let paLotStock = {};        // "CÓDIGO|LOTE" -> qty (saldo atual, vem da import
 let pendingLots = null;     // importação em andamento
 let alertasTab = 'validade';
 let alertasFilters = { search: '', family: '', crit: '' };
+let alertasSort = { key: 'days', dir: 'asc' }; // ordenação clicável da tabela de validade
+
+const ALERTAS_SORT_GETTERS = {
+  product: (l, p) => (p?.description || '').toLowerCase(),
+  lot:     (l)     => (l.lot || '').toLowerCase(),
+  family:  (l, p)  => (p?.family || '').toLowerCase(),
+  qty:     (l)     => l.qty || 0,
+  days:    (l)     => l.days,
+  crit:    (l)     => LOT_CRIT[lotCrit(l.days)].order,
+};
+function sortAlertasRows(rows, products) {
+  const get = ALERTAS_SORT_GETTERS[alertasSort.key] || ALERTAS_SORT_GETTERS.days;
+  const dir = alertasSort.dir === 'desc' ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    const va = get(a, products.get(a.code.toUpperCase()));
+    const vb = get(b, products.get(b.code.toUpperCase()));
+    if (va < vb) return -1 * dir;
+    if (va > vb) return 1 * dir;
+    return 0;
+  });
+}
+function alertasSortHeader(label, key, numeric) {
+  const active = alertasSort.key === key;
+  const arrow = active ? (alertasSort.dir === 'asc' ? '▲' : '▼') : '';
+  return `<th class="${numeric ? 'num-c ' : ''}sortable-th" data-sort-key="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--accent-dark)' : ''}">${label} <span style="font-size:10px">${arrow}</span></th>`;
+}
 
 async function loadPaLotStock() {
   const { data, error } = await selectAll('pa_lot_stock', 'code,lot,qty');
@@ -3610,7 +3636,7 @@ function renderAlertas() {
   const isVal = alertasTab === 'validade';
   const q = alertasFilters.search.trim().toLowerCase();
 
-  const valRows = lots
+  const valRows = sortAlertasRows(lots
     .filter(l => {
       const p = products.get(l.code.toUpperCase());
       if (alertasFilters.family && (p?.family || '') !== alertasFilters.family) return false;
@@ -3618,8 +3644,7 @@ function renderAlertas() {
       if (q) return l.code.toLowerCase().includes(q) || (l.lot || '').toLowerCase().includes(q)
                  || (p?.description || '').toLowerCase().includes(q);
       return true;
-    })
-    .sort((a, b) => a.days - b.days);
+    }), products);
 
   const slowRows = slowAll.filter(({ p }) => {
     if (alertasFilters.family && (p.family || '') !== alertasFilters.family) return false;
@@ -3693,13 +3718,13 @@ function renderAlertas() {
       <div class="tbl-wrap">
         <table>
           <thead><tr>
-            <th>Produto</th>
-            <th>Lote</th>
-            <th>Família</th>
-            <th class="num-c">Qtd</th>
-            <th class="num-c">Validade</th>
-            <th class="num-c">Dias rest.</th>
-            <th class="num-c">Criticidade</th>
+            ${alertasSortHeader('Produto', 'product')}
+            ${alertasSortHeader('Lote', 'lot')}
+            ${alertasSortHeader('Família', 'family')}
+            ${alertasSortHeader('Qtd', 'qty', true)}
+            ${alertasSortHeader('Validade', 'days', true)}
+            ${alertasSortHeader('Dias rest.', 'days', true)}
+            ${alertasSortHeader('Criticidade', 'crit', true)}
           </tr></thead>
           <tbody>
             ${!valRows.length ? `<tr><td colspan="7" class="empty">${paLots.length ? 'Nenhum lote encontrado com os filtros aplicados.' : 'Nenhum lote importado ainda.'}</td></tr>` :
@@ -3771,6 +3796,14 @@ function renderAlertas() {
   });
   document.getElementById('alertas-family')?.addEventListener('change', e => { alertasFilters.family = e.target.value; renderAlertas(); });
   document.getElementById('alertas-crit')?.addEventListener('change',   e => { alertasFilters.crit   = e.target.value; renderAlertas(); });
+  document.querySelectorAll('[data-sort-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sortKey;
+      if (alertasSort.key === key) alertasSort.dir = alertasSort.dir === 'asc' ? 'desc' : 'asc';
+      else alertasSort = { key, dir: 'asc' };
+      renderAlertas();
+    });
+  });
   document.getElementById('btn-alertas-export')?.addEventListener('click', () => {
     if (alertasTab === 'validade') exportValidadeXLSX(valRows, products);
     else exportSlowMovingXLSX(slowRows);
