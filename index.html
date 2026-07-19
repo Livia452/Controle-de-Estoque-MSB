@@ -303,6 +303,22 @@ const SUPABASE_URL             = 'https://hytvtwtiekznvjhngtwl.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_8KRMNDDdFiJwUWxK0QtazQ_i0l_ADvx';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
+// O Supabase (PostgREST) devolve no máximo ~1000 linhas por select, mesmo sem
+// limit explícito — tabelas grandes (pa_lots, pa_lot_stock, materials_bom)
+// ficavam silenciosamente truncadas. Pagina com .range() até esgotar.
+async function selectAll(table, columns) {
+  const PAGE = 1000;
+  let from = 0, all = [];
+  while (true) {
+    const { data, error } = await sb.from(table).select(columns).range(from, from + PAGE - 1);
+    if (error) return { data: null, error };
+    all = all.concat(data);
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+  return { data: all, error: null };
+}
+
 let currentSession = null; // sessão do Supabase Auth, ou null
 let currentProfile = null; // { id, email, role } da tabela profiles, ou null
 
@@ -775,7 +791,7 @@ function paProductToRow(p) {
 
 const storage = {
   async load() {
-    const { data, error } = await sb.from('pa_products').select('*');
+    const { data, error } = await selectAll('pa_products', '*');
     if (error) { showToast('Erro ao carregar produtos: ' + error.message, 'err'); return []; }
     if (!data.length) {
       // Base ainda vazia: semeia com o catálogo padrão (só grava se já tiver login, por causa da RLS)
@@ -2076,7 +2092,7 @@ function materialItemToRow(item) {
   };
 }
 async function loadMemsItems() {
-  const { data, error } = await sb.from('materials').select('*');
+  const { data, error } = await selectAll('materials', '*');
   if (error) { showToast('Erro ao carregar materiais: ' + error.message, 'err'); return []; }
   if (!data.length) {
     const seeded = MEMS_SEED.map(i => ({ ...i, stock:0, avgForecast:0, avgConsumption:0, inTransit:0, consumoHistory:{}, forecastHistory:{}, transitEntries:[] }));
@@ -2170,7 +2186,7 @@ let pendingMemsBom      = null; // estrutura de produtos (planilha de consumo po
 // qty = unidades do componente consumidas por 1 unidade do próximo uso (parent)
 let memsBom = [];
 async function loadMemsBom() {
-  const { data, error } = await sb.from('materials_bom').select('code,parent,final,qty,unit');
+  const { data, error } = await selectAll('materials_bom', 'code,parent,final,qty,unit');
   if (error) { showToast('Erro ao carregar estrutura: ' + error.message, 'err'); return []; }
   return data;
 }
@@ -2186,7 +2202,7 @@ async function saveMemsBom() {
 // Estoque dos nós da estrutura que não são materiais nem PA (ex: PIs), capturado no import de estoque
 let memsBomStock = {};
 async function loadMemsBomStock() {
-  const { data, error } = await sb.from('materials_bom_stock').select('code,stock');
+  const { data, error } = await selectAll('materials_bom_stock', 'code,stock');
   if (error) { showToast('Erro ao carregar estoque da estrutura: ' + error.message, 'err'); return {}; }
   const map = {};
   data.forEach(r => { map[r.code] = r.stock; });
@@ -3473,7 +3489,7 @@ let alertasTab = 'validade';
 let alertasFilters = { search: '', family: '', crit: '' };
 
 async function loadPaLotStock() {
-  const { data, error } = await sb.from('pa_lot_stock').select('code,lot,qty');
+  const { data, error } = await selectAll('pa_lot_stock', 'code,lot,qty');
   if (error) { console.warn('pa_lot_stock indisponível:', error.message); return {}; }
   const map = {};
   data.forEach(r => { map[String(r.code).toUpperCase() + '|' + String(r.lot).toUpperCase()] = r.qty; });
@@ -3494,7 +3510,7 @@ async function savePaLotStock() {
 }
 
 async function loadPaLots() {
-  const { data, error } = await sb.from('pa_lots').select('code,lot,expiry,updated_at');
+  const { data, error } = await selectAll('pa_lots', 'code,lot,expiry,updated_at');
   if (error) {
     // tabela pode ainda não existir no Supabase (schema.sql desatualizado) — não trava o boot
     console.warn('pa_lots indisponível:', error.message);
