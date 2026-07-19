@@ -2132,6 +2132,7 @@ async function saveMemsMeta() {
 let memsMeta = {};
 
 let memsFilters         = { search: '', type: '', family: '', supplier: '', status: '', hideNoGiro: false };
+let memsSort = { key: null, dir: 'asc' }; // null = ordenação padrão (% de cobertura do lead time)
 
 // Colunas da tabela de materiais — o usuário escolhe quais aparecem (Código é fixa).
 // "Cob. Pior Caso" foi removida de propósito: com o pior caso já sendo o consumo
@@ -2583,6 +2584,17 @@ function renderMems() {
     }
     return true;
   }).sort((a, b) => {
+    if (memsSort.key === 'cobertura' || memsSort.key === 'cobpropria') {
+      const getter = memsSort.key === 'cobertura' ? memsCoverage : memsOwnCoverage;
+      const va = getter(a), vb = getter(b);
+      // sem dado de cobertura (Infinity/NaN) sempre no fim, nas duas direções
+      const na = Number.isFinite(va) ? va : Infinity;
+      const nb = Number.isFinite(vb) ? vb : Infinity;
+      if (na === Infinity && nb === Infinity) return 0;
+      if (na === Infinity) return 1;
+      if (nb === Infinity) return -1;
+      return memsSort.dir === 'desc' ? nb - na : na - nb;
+    }
     const pa = memsLeadCoveragePct(a), pb = memsLeadCoveragePct(b);
     if (pa != null && pb != null) return pa - pb;
     if (pa != null) return -1;
@@ -2697,8 +2709,8 @@ function renderMems() {
             ${vis('consumo')    ? '<th class="num-c">Consumo Médio</th>' : ''}
             ${vis('forecast')   ? '<th class="num-c">Média Forecast</th>' : ''}
             ${vis('transito')   ? '<th class="num-c">Em Trânsito</th>' : ''}
-            ${vis('cobertura')  ? '<th class="num-c">Cobertura</th>' : ''}
-            ${vis('cobpropria') ? '<th class="num-c">Cobertura própria</th>' : ''}
+            ${vis('cobertura')  ? memsSortHeader('Cobertura', 'cobertura') : ''}
+            ${vis('cobpropria') ? memsSortHeader('Cobertura própria', 'cobpropria') : ''}
             ${vis('status')     ? '<th class="num-c">Status</th>' : ''}
           </tr></thead>
           <tbody>
@@ -2800,6 +2812,19 @@ function renderMems() {
     memsFilters.hideNoGiro = e.target.checked;
     renderMems();
   });
+  document.querySelectorAll('[data-mems-sort-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.memsSortKey;
+      if (memsSort.key === key) memsSort.dir = memsSort.dir === 'asc' ? 'desc' : 'asc';
+      else memsSort = { key, dir: 'asc' };
+      renderMems();
+    });
+  });
+}
+function memsSortHeader(label, key) {
+  const active = memsSort.key === key;
+  const arrow = active ? (memsSort.dir === 'asc' ? '▲' : '▼') : '';
+  return `<th class="num-c sortable-th" data-mems-sort-key="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--accent-dark)' : ''}">${label} <span style="font-size:10px">${arrow}</span></th>`;
 }
 
 // ── ATUALIZAR ESTOQUE — painel único com sub-abas de import ───────────────
