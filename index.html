@@ -3486,7 +3486,7 @@ let paLots = [];            // [{ code, lot, expiry: 'YYYY-MM-DD', updatedAt }] 
 let paLotStock = {};        // "CÓDIGO|LOTE" -> qty (saldo atual, vem da importação de estoque)
 let pendingLots = null;     // importação em andamento
 let alertasTab = 'validade';
-let alertasFilters = { search: '', family: '', crit: '' };
+let alertasFilters = { search: '', family: '', crit: [] }; // crit: array — vazio = todas
 let alertasSort = { key: 'days', dir: 'asc' }; // ordenação clicável da tabela de validade
 
 const ALERTAS_SORT_GETTERS = {
@@ -3571,14 +3571,17 @@ const LOT_CRIT = {
   atencao:  { label: 'Atenção',  cls: 'b-warn', order: 2 },
   monitorar:{ label: 'Monitorar',cls: 'b-high', order: 3 },
 };
+// Dias-limite de cada faixa: crítico < 6 meses, atenção 6m–1 ano, monitorar 1–1,5 ano.
+const LOT_CRIT_DAYS = { critico: 182, atencao: 365, monitorar: 548 };
 function lotCrit(days) {
   if (days == null) return null;
-  if (days < 0)   return 'vencido';
-  if (days < 90)  return 'critico';
-  if (days < 180) return 'atencao';
-  return 'monitorar';
+  if (days < 0) return 'vencido';
+  if (days < LOT_CRIT_DAYS.critico)   return 'critico';
+  if (days < LOT_CRIT_DAYS.atencao)   return 'atencao';
+  if (days < LOT_CRIT_DAYS.monitorar) return 'monitorar';
+  return null; // além de 1,5 ano — fora da janela, não aparece na aba
 }
-// Janela da aba: até 12 meses à frente (inclui vencidos — pior caso possível).
+// Janela da aba: até 1,5 ano à frente (inclui vencidos — pior caso possível).
 // A quantidade NÃO vem do mestre de validade (que é histórico e não tem saldo
 // atual) — vem do cruzamento por (código + lote) com a importação de estoque.
 // Só entra o lote que satisfaz as DUAS condições (E):
@@ -3593,7 +3596,7 @@ function lotsInWindow() {
       qty: paLotStock[String(l.code).toUpperCase() + '|' + String(l.lot).toUpperCase()] || 0,
       days: lotDaysLeft(l.expiry),
     }))
-    .filter(l => l.qty > 0 && state.getByCode(l.code) != null && l.days != null && l.days <= 365);
+    .filter(l => l.qty > 0 && state.getByCode(l.code) != null && l.days != null && l.days < LOT_CRIT_DAYS.monitorar);
 }
 
 /* ── Slow moving (calculado, PA) ──────────────────────────────────────────
@@ -3627,7 +3630,7 @@ function renderAlertas() {
   const products = new Map(state.getAll().map(p => [p.code.toUpperCase(), p]));
   const families = [...new Set(state.getAll().map(p => p.family).filter(Boolean))].sort();
 
-  const criticos   = lots.filter(l => l.days < 90);
+  const criticos   = lots.filter(l => l.days < LOT_CRIT_DAYS.critico);
   const critUnits  = criticos.reduce((s, l) => s + (l.qty || 0), 0);
   const lotsUnits  = lots.reduce((s, l) => s + (l.qty || 0), 0);
   const slowUnits  = slowAll.reduce((s, x) => s + (x.p.stock || 0), 0);
@@ -3640,7 +3643,7 @@ function renderAlertas() {
     .filter(l => {
       const p = products.get(l.code.toUpperCase());
       if (alertasFilters.family && (p?.family || '') !== alertasFilters.family) return false;
-      if (alertasFilters.crit && lotCrit(l.days) !== alertasFilters.crit) return false;
+      if (alertasFilters.crit.length && !alertasFilters.crit.includes(lotCrit(l.days))) return false;
       if (q) return l.code.toLowerCase().includes(q) || (l.lot || '').toLowerCase().includes(q)
                  || (p?.description || '').toLowerCase().includes(q);
       return true;
@@ -3670,10 +3673,10 @@ function renderAlertas() {
         <div class="kpi" style="${criticos.length ? 'border-color:var(--danger-text)' : ''}">
           <div class="kpi-label">🔴 Lotes críticos</div>
           <div class="kpi-value ${criticos.length ? 'text-danger' : ''}">${criticos.length}</div>
-          <div class="kpi-sub">vencido ou &lt; 3 meses · ${fmt.int(critUnits)} un</div>
+          <div class="kpi-sub">vencido ou &lt; 6 meses · ${fmt.int(critUnits)} un</div>
         </div>
         <div class="kpi">
-          <div class="kpi-label">📅 Vencendo em 12 meses</div>
+          <div class="kpi-label">📅 Vencendo em 1,5 ano</div>
           <div class="kpi-value">${lots.length}</div>
           <div class="kpi-sub">${fmt.int(lotsUnits)} unidades no total</div>
         </div>
@@ -3704,13 +3707,20 @@ function renderAlertas() {
           ${families.map(f => `<option value="${f}" ${alertasFilters.family === f ? 'selected' : ''}>${f}</option>`).join('')}
         </select>
         ${isVal ? `
-        <select class="filter-select" id="alertas-crit">
-          <option value="">Toda criticidade</option>
-          <option value="vencido"   ${alertasFilters.crit === 'vencido'   ? 'selected' : ''}>Vencido</option>
-          <option value="critico"   ${alertasFilters.crit === 'critico'   ? 'selected' : ''}>Crítico (&lt; 3 meses)</option>
-          <option value="atencao"   ${alertasFilters.crit === 'atencao'   ? 'selected' : ''}>Atenção (3–6 meses)</option>
-          <option value="monitorar" ${alertasFilters.crit === 'monitorar' ? 'selected' : ''}>Monitorar (6–12 meses)</option>
-        </select>` : ''}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          ${[
+            ['vencido',   'Vencido',    'Já venceu'],
+            ['critico',   'Crítico',    'Abaixo de 6 meses'],
+            ['atencao',   'Atenção',    'Entre 6 meses e 1 ano'],
+            ['monitorar', 'Monitorar',  'Entre 1 e 1,5 anos'],
+          ].map(([key, label, hint]) => {
+            const active = alertasFilters.crit.includes(key);
+            const cm = LOT_CRIT[key];
+            return `<button type="button" class="badge ${cm.cls} crit-chip" data-crit-chip="${key}" title="${hint}"
+              style="cursor:pointer;border:2px solid ${active ? 'currentColor' : 'transparent'};opacity:${!alertasFilters.crit.length || active ? 1 : .4}">${label}</button>`;
+          }).join('')}
+          ${alertasFilters.crit.length ? `<button type="button" class="badge" id="btn-crit-clear" style="cursor:pointer;background:var(--border);color:var(--muted)">Limpar</button>` : ''}
+        </div>` : ''}
         <span class="filter-results">${isVal ? valRows.length : slowRows.length} registros</span>
       </div>
 
@@ -3748,7 +3758,7 @@ function renderAlertas() {
           </tbody>
         </table>
       </div>
-      <p class="last-update" style="margin-top:8px">Regra: vencido &lt; hoje · crítico &lt; 3 meses · atenção 3–6 meses · monitorar 6–12 meses (por lote) · ordenado por validade mais próxima</p>
+      <p class="last-update" style="margin-top:8px">Regra: vencido &lt; hoje · crítico &lt; 6 meses · atenção 6 meses – 1 ano · monitorar 1 – 1,5 ano (por lote) · ordenado por validade mais próxima</p>
       ` : `
       <div class="tbl-wrap">
         <table>
@@ -3788,14 +3798,22 @@ function renderAlertas() {
   `;
 
   document.querySelectorAll('[data-alertas-tab]').forEach(btn => {
-    btn.addEventListener('click', () => { alertasTab = btn.dataset.alertasTab; alertasFilters.crit = ''; renderAlertas(); });
+    btn.addEventListener('click', () => { alertasTab = btn.dataset.alertasTab; alertasFilters.crit = []; renderAlertas(); });
   });
   let _at;
   document.getElementById('alertas-search')?.addEventListener('input', e => {
     clearTimeout(_at); _at = setTimeout(() => { alertasFilters.search = e.target.value; renderAlertas(); }, 220);
   });
   document.getElementById('alertas-family')?.addEventListener('change', e => { alertasFilters.family = e.target.value; renderAlertas(); });
-  document.getElementById('alertas-crit')?.addEventListener('change',   e => { alertasFilters.crit   = e.target.value; renderAlertas(); });
+  document.querySelectorAll('[data-crit-chip]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const key = chip.dataset.critChip;
+      const i = alertasFilters.crit.indexOf(key);
+      if (i === -1) alertasFilters.crit.push(key); else alertasFilters.crit.splice(i, 1);
+      renderAlertas();
+    });
+  });
+  document.getElementById('btn-crit-clear')?.addEventListener('click', () => { alertasFilters.crit = []; renderAlertas(); });
   document.querySelectorAll('[data-sort-key]').forEach(th => {
     th.addEventListener('click', () => {
       const key = th.dataset.sortKey;
