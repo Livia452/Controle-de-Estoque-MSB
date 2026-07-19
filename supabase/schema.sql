@@ -87,9 +87,12 @@ create table if not exists pa_lot_stock (
   code       text not null,
   lot        text not null,
   qty        numeric not null default 0,
+  expiry     date,                     -- validade do lote (vem na mesma planilha de estoque)
   updated_at timestamptz not null default now(),
   primary key (code, lot)
 );
+-- se a tabela já existia sem a coluna, adiciona
+alter table pa_lot_stock add column if not exists expiry date;
 
 -- ── USUÁRIOS / PAPÉIS ──────────────────────────────────────────────────
 -- ligada ao login do Supabase (auth.users); role controla quem vê "Gerenciar usuários"

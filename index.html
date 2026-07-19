@@ -939,14 +939,17 @@ function toDate(val) {
 
 /* Agrega estoque: soma Quantidade física disponível por Número do item.
    Se a planilha tiver coluna de lote (nome detectado de forma flexível), também
-   soma o saldo por (código + lote) — usado no cruzamento da aba Alertas com a
-   planilha de validade. lotStock: mapa "CÓDIGO|LOTE" -> qty. */
+   captura o saldo por (código + lote) e, quando houver, a validade daquele lote —
+   é o que alimenta a aba Alertas de Estoque (a mesma planilha de estoque traz
+   código + lote + quantidade + validade, tudo junto).
+   lotStock: mapa "CÓDIGO|LOTE" -> { qty, expiry('YYYY-MM-DD'|null) }. */
 function aggregateStock(rows) {
   const map = {};
   const lotStock = {};
   let skipped = 0;
-  // nome da coluna de lote varia ("Nº do lote", "Lote", …) — acha a primeira que casa
-  const lotKey = rows.length ? Object.keys(rows[0]).find(k => /lote/i.test(k)) : null;
+  const header = rows.length ? Object.keys(rows[0]) : [];
+  const lotKey    = header.find(k => /lote/i.test(k));            // "Nº do lote"
+  const expiryKey = header.find(k => /valid|venc|expira/i.test(k)); // "Validade"
   for (const row of rows) {
     const code = String(row[COL_STOCK.code] || '').trim();
     if (!code) { skipped++; continue; }
@@ -959,7 +962,13 @@ function aggregateStock(rows) {
       const lot = String(row[lotKey] || '').trim();
       if (lot) {
         const k = code.toUpperCase() + '|' + lot.toUpperCase();
-        lotStock[k] = (lotStock[k] || 0) + qty;
+        if (!lotStock[k]) lotStock[k] = { qty: 0, expiry: null };
+        lotStock[k].qty += qty;
+        if (expiryKey && !lotStock[k].expiry) {
+          const raw = row[expiryKey];
+          const d = raw instanceof Date && !isNaN(raw) ? raw : toDate(raw);
+          if (d && !isNaN(d)) lotStock[k].expiry = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        }
       }
     }
   }
@@ -1356,7 +1365,7 @@ function renderEditor() {
         <!-- Stock import -->
         <div class="import-card">
           <p class="import-card-title"><i class="ti ti-table-import" aria-hidden="true"></i> Importar estoque</p>
-          <p class="import-card-sub">Atualização diária · Soma todas as linhas por produto · atualiza PA, SA e Materiais (ME/MP/MS)</p>
+          <p class="import-card-sub">Atualização diária · Soma todas as linhas por produto · atualiza PA, SA e Materiais (ME/MP/MS) · se tiver Nº do lote e Validade, alimenta os Alertas de Estoque</p>
           <div class="drop-zone" id="dz-stock">
             <input type="file" id="fi-stock" accept=".xlsx,.xls,.csv" aria-label="Selecionar arquivo de estoque">
             <div class="drop-zone-icon"><i class="ti ti-file-spreadsheet" aria-hidden="true"></i></div>
@@ -1409,33 +1418,6 @@ function renderEditor() {
           </div>
         </div>
 
-        <!-- Lots/expiry import -->
-        <div class="import-card">
-          <p class="import-card-title"><i class="ti ti-calendar-due" aria-hidden="true"></i> Importar validade (lotes)</p>
-          <p class="import-card-sub">Lotes de PA com data de validade · cada importação substitui a lista anterior · alimenta a aba Alertas de Estoque</p>
-          <div class="drop-zone" id="dz-lots">
-            <input type="file" id="fi-lots" accept=".xlsx,.xls,.csv" aria-label="Selecionar arquivo de lotes com validade">
-            <div class="drop-zone-icon"><i class="ti ti-file-spreadsheet" aria-hidden="true"></i></div>
-            <p class="drop-zone-text">Arraste o arquivo ou clique para selecionar</p>
-            <p class="drop-zone-hint">.xlsx · .xls · .csv</p>
-          </div>
-          <div class="import-preview" id="prev-lots">
-            <p class="import-info" id="prev-lots-info"></p>
-            <div class="preview-tbl-wrap">
-              <table class="preview-tbl">
-                <thead><tr><th>Código</th><th>Lote</th><th>Validade</th></tr></thead>
-                <tbody id="prev-lots-body"></tbody>
-              </table>
-            </div>
-            <div class="preview-actions">
-              <span class="preview-count" id="prev-lots-count"></span>
-              <div style="display:flex;gap:8px">
-                <button class="btn btn-sm btn-ghost" id="btn-lots-cancel">Cancelar</button>
-                <button class="btn btn-sm btn-primary" id="btn-lots-apply"><i class="ti ti-check" aria-hidden="true"></i> Aplicar</button>
-              </div>
-            </div>
-          </div>
-        </div>
       </div>
 
       <div class="divider"></div>
@@ -1511,11 +1493,6 @@ function bindEditorEvents() {
   document.getElementById('btn-sales-apply')?.addEventListener('click', applySalesImport);
   setupDragDrop('dz-sales', 'fi-sales');
 
-  // Lots/expiry import
-  document.getElementById('fi-lots')?.addEventListener('change', e => handleLotsFile(e.target.files[0]));
-  document.getElementById('btn-lots-cancel')?.addEventListener('click', cancelLotsImport);
-  document.getElementById('btn-lots-apply')?.addEventListener('click', applyLotsImport);
-  setupDragDrop('dz-lots', 'fi-lots');
 }
 
 function setupDragDrop(dzId, fiId) {
@@ -1529,7 +1506,6 @@ function setupDragDrop(dzId, fiId) {
     const file = e.dataTransfer?.files[0];
     if (!file) return;
     if (fiId === 'fi-stock')      handleStockFile(file);
-    else if (fiId === 'fi-lots')  handleLotsFile(file);
     else                          handleSalesFile(file);
   });
 }
@@ -3465,17 +3441,16 @@ async function runLocalMigration() {
      = giro anualizado); nada novo pra importar
 ═══════════════════════════════════════════════ */
 const alertasEl = document.getElementById('view-alertas');
-let paLots = [];            // [{ code, lot, expiry: 'YYYY-MM-DD', updatedAt }] — mestre de validade
-let paLotStock = {};        // "CÓDIGO|LOTE" -> qty (saldo atual, vem da importação de estoque)
-let pendingLots = null;     // importação em andamento
+let paLots = [];            // [{ code, lot, expiry: 'YYYY-MM-DD', updatedAt }] — mestre de validade (fallback)
+let paLotStock = {};        // "CÓDIGO|LOTE" -> { qty, expiry } — saldo + validade, da importação de estoque
 let alertasTab = 'validade';
 let alertasFilters = { search: '', family: '', crit: '' };
 
 async function loadPaLotStock() {
-  const { data, error } = await sb.from('pa_lot_stock').select('code,lot,qty');
+  const { data, error } = await sb.from('pa_lot_stock').select('code,lot,qty,expiry');
   if (error) { console.warn('pa_lot_stock indisponível:', error.message); return {}; }
   const map = {};
-  data.forEach(r => { map[String(r.code).toUpperCase() + '|' + String(r.lot).toUpperCase()] = r.qty; });
+  data.forEach(r => { map[String(r.code).toUpperCase() + '|' + String(r.lot).toUpperCase()] = { qty: r.qty, expiry: r.expiry }; });
   return map;
 }
 async function savePaLotStock() {
@@ -3484,7 +3459,7 @@ async function savePaLotStock() {
   const keys = Object.keys(paLotStock);
   if (!keys.length) return;
   const now = new Date().toISOString();
-  const rows = keys.map(k => { const [code, lot] = k.split('|'); return { code, lot, qty: paLotStock[k], updated_at: now }; });
+  const rows = keys.map(k => { const [code, lot] = k.split('|'); return { code, lot, qty: paLotStock[k].qty, expiry: paLotStock[k].expiry, updated_at: now }; });
   // insere em blocos pra não estourar limite de payload (planilha de estoque tem muitas linhas)
   for (let i = 0; i < rows.length; i += 500) {
     const { error } = await sb.from('pa_lot_stock').insert(rows.slice(i, i + 500));
@@ -3501,21 +3476,6 @@ async function loadPaLots() {
   }
   return data.map(r => ({ code: r.code, lot: r.lot, expiry: r.expiry, updatedAt: r.updated_at }));
 }
-async function savePaLots() {
-  const { error: delErr } = await sb.from('pa_lots').delete().neq('code', '');
-  if (delErr) { showToast('Erro ao salvar lotes: ' + delErr.message, 'err'); return false; }
-  if (!paLots.length) return true;
-  const now = new Date().toISOString();
-  // grava em blocos — o mestre de validade pode ter milhares de lotes
-  for (let i = 0; i < paLots.length; i += 500) {
-    const { error } = await sb.from('pa_lots').insert(
-      paLots.slice(i, i + 500).map(l => ({ code: l.code, lot: l.lot || '', expiry: l.expiry, updated_at: now }))
-    );
-    if (error) { showToast('Erro ao salvar lotes: ' + error.message, 'err'); return false; }
-  }
-  return true;
-}
-
 /* ── Regras de criticidade (por lote, dias até vencer) ── */
 function lotDaysLeft(expiry) {
   const d = expiry ? new Date(expiry + 'T00:00:00') : null;
@@ -3536,21 +3496,29 @@ function lotCrit(days) {
   return 'monitorar';
 }
 // Janela da aba: até 12 meses à frente (inclui vencidos — pior caso possível).
-// A quantidade NÃO vem do mestre de validade (que é histórico e não tem saldo
-// atual) — vem do cruzamento por (código + lote) com a importação de estoque.
-// Só entra o lote que satisfaz as DUAS condições (E):
+// Fonte primária = os lotes vindos da importação de ESTOQUE (paLotStock), que já
+// trazem saldo E validade na mesma planilha. Só entra o lote que satisfaz as DUAS
+// condições (E):
 //   1) o código é de um produto acabado (PA) cadastrado — ignora lote de
-//      material/PI que porventura tenha vindo no arquivo de validade;
-//   2) tem saldo em estoque hoje (cruzamento com a planilha de estoque > 0) —
-//      lote já consumido não gera alerta de validade.
+//      material/PI/PI que venha na planilha;
+//   2) tem saldo em estoque hoje (qty > 0) — lote já consumido não gera alerta.
+// A validade vem do próprio estoque; se faltar ali, cai pro mestre de validade
+// importado à parte (paLots), casando por código+lote.
 function lotsInWindow() {
-  return paLots
-    .map(l => ({
-      ...l,
-      qty: paLotStock[String(l.code).toUpperCase() + '|' + String(l.lot).toUpperCase()] || 0,
-      days: lotDaysLeft(l.expiry),
-    }))
-    .filter(l => l.qty > 0 && state.getByCode(l.code) != null && l.days != null && l.days <= 365);
+  const masterExpiry = {};
+  paLots.forEach(l => { masterExpiry[String(l.code).toUpperCase() + '|' + String(l.lot).toUpperCase()] = l.expiry; });
+  const out = [];
+  for (const [k, v] of Object.entries(paLotStock)) {
+    const qty = v.qty || 0;
+    if (qty <= 0) continue;
+    const [code, lot] = k.split('|');
+    if (state.getByCode(code) == null) continue;
+    const expiry = v.expiry || masterExpiry[k] || null;
+    const days = lotDaysLeft(expiry);
+    if (days == null || days > 365) continue;
+    out.push({ code, lot, qty, expiry, days });
+  }
+  return out;
 }
 
 /* ── Slow moving (calculado, PA) ──────────────────────────────────────────
@@ -3588,7 +3556,8 @@ function renderAlertas() {
   const critUnits  = criticos.reduce((s, l) => s + (l.qty || 0), 0);
   const lotsUnits  = lots.reduce((s, l) => s + (l.qty || 0), 0);
   const slowUnits  = slowAll.reduce((s, x) => s + (x.p.stock || 0), 0);
-  const lastUpdate = paLots.length ? paLots.reduce((m, l) => l.updatedAt > m ? l.updatedAt : m, '') : null;
+  const lastUpdate = memsMeta.stockUpdatedAt || null;  // validade e saldo vêm da importação de estoque
+  const semDadosLote = Object.keys(paLotStock).length === 0;
 
   const isVal = alertasTab === 'validade';
   const q = alertasFilters.search.trim().toLowerCase();
@@ -3616,8 +3585,8 @@ function renderAlertas() {
         <div>
           <h1 class="page-title">Alertas de Estoque</h1>
           <p class="last-update">Validade de lotes e giro baixo — produto acabado</p>
-          ${lastUpdate ? `<p class="last-update">lotes atualizados em ${new Date(lastUpdate).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })}</p>` : ''}
-          ${!paLots.length ? `<p class="last-update">Importe os lotes com validade na aba <strong>Atualizar estoque (PCP)</strong> → Importar validade (lotes)</p>` : ''}
+          ${lastUpdate ? `<p class="last-update">estoque/validade atualizados em ${new Date(lastUpdate).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })}</p>` : ''}
+          ${semDadosLote ? `<p class="last-update">Importe a planilha de estoque (com <strong>Nº do lote</strong> e <strong>Validade</strong>) na aba <strong>Atualizar estoque (PCP)</strong> → Importar estoque</p>` : ''}
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-ghost" id="btn-alertas-export"><i class="ti ti-download"></i> Exportar CSV (${isVal ? 'validade' : 'slow moving'})</button>
@@ -3685,7 +3654,7 @@ function renderAlertas() {
             <th class="num-c">Criticidade</th>
           </tr></thead>
           <tbody>
-            ${!valRows.length ? `<tr><td colspan="7" class="empty">${paLots.length ? 'Nenhum lote encontrado com os filtros aplicados.' : 'Nenhum lote importado ainda.'}</td></tr>` :
+            ${!valRows.length ? `<tr><td colspan="7" class="empty">${semDadosLote ? 'Importe a planilha de estoque (com lote e validade) na aba Atualizar estoque (PCP).' : 'Nenhum lote de PA com saldo e validade nos próximos 12 meses.'}</td></tr>` :
               valRows.map(l => {
                 const p = products.get(l.code.toUpperCase());
                 const ck = lotCrit(l.days), cm = LOT_CRIT[ck];
@@ -3782,116 +3751,6 @@ function exportSlowMovingCSV(rows) {
   const csv = [header.join(','), ...lines].join('\n');
   const a = Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv), download: `slow_moving_${new Date().toISOString().slice(0, 10)}.csv` });
   a.click();
-}
-
-/* ── Importação de lotes com validade ─────────────────────────────────────
-   Cabeçalho flexível: procura a linha que tenha colunas de código, lote e
-   validade (nomes variam conforme o relatório do Dynamics). Datas aceitas
-   como célula de data do Excel ou texto dd/mm/aaaa. */
-// Mestre de validade: só precisa de código + lote + data de validade. A
-// quantidade NÃO é lida daqui (o saldo atual vem do cruzamento com o estoque).
-function parseLotsSheet(ws) {
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-  const findCol = (header, patterns) => header.findIndex(h => patterns.some(rx => rx.test(String(h).trim().toLowerCase())));
-  let headerRowIdx = -1, iCode = -1, iLot = -1, iExpiry = -1;
-  for (let r = 0; r < Math.min(rows.length, 20); r++) {
-    const header = rows[r];
-    const c = findCol(header, [/n[úu]mero do item/, /^c[óo]d/, /^item$/, /c[óo]digo/]);
-    const l = findCol(header, [/lote/]);
-    const v = findCol(header, [/valid/, /venc/, /expira/]);
-    if (c !== -1 && l !== -1 && v !== -1) { headerRowIdx = r; iCode = c; iLot = l; iExpiry = v; break; }
-  }
-  if (headerRowIdx === -1) return null;
-  const out = [];
-  for (let r = headerRowIdx + 1; r < rows.length; r++) {
-    const row = rows[r];
-    const code = String(row[iCode] || '').trim().toUpperCase();
-    if (!code) continue;
-    const rawDate = row[iExpiry];
-    const d = rawDate instanceof Date && !isNaN(rawDate) ? rawDate : toDate(rawDate);
-    if (!d || isNaN(d)) continue;
-    out.push({
-      code,
-      lot: String(row[iLot] || '').trim(),
-      expiry: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
-    });
-  }
-  return out;
-}
-
-async function handleLotsFile(file) {
-  if (!file) return;
-  if (!isLoggedIn()) { showToast('Faça login antes de importar os lotes.', 'err'); return; }
-  showLoading('Lendo arquivo de lotes…');
-  try {
-    const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-    let rows = null;
-    for (const sheetName of wb.SheetNames) {
-      rows = parseLotsSheet(wb.Sheets[sheetName]);
-      if (rows && rows.length) break;
-    }
-    if (!rows || !rows.length) {
-      showToast('Não encontramos colunas de código, lote e validade nesse arquivo.', 'err');
-      const info = document.getElementById('prev-lots-info');
-      if (info) {
-        document.getElementById('prev-lots').classList.add('visible');
-        info.innerHTML = `<i class="ti ti-alert-circle" aria-hidden="true"></i> Colunas encontradas:<br><span style="font-size:11px;color:var(--hint)">${memsFileHeaderPreview(wb)}</span>`;
-        document.getElementById('prev-lots-body').innerHTML = '';
-        document.getElementById('prev-lots-count').textContent = '';
-      }
-      return;
-    }
-    // dedup por (código + lote + validade) — alguns relatórios repetem o lote por depósito
-    const map = {};
-    rows.forEach(r => { map[`${r.code}|${r.lot}|${r.expiry}`] = r; });
-    const items = Object.values(map).sort((a, b) => a.expiry.localeCompare(b.expiry));
-    pendingLots = { items, filename: file.name, totalRows: rows.length };
-    renderLotsPreview();
-  } catch (err) {
-    showToast('Erro ao ler o arquivo: ' + err.message, 'err');
-  } finally {
-    hideLoading();
-  }
-}
-
-function renderLotsPreview() {
-  if (!pendingLots) return;
-  const { items, filename, totalRows } = pendingLots;
-  const prev = document.getElementById('prev-lots');
-  prev.classList.add('visible');
-  document.getElementById('prev-lots-info').innerHTML =
-    `<i class="ti ti-file" aria-hidden="true"></i> <strong>${filename}</strong> · ${totalRows} linhas`;
-  document.getElementById('prev-lots-body').innerHTML = items.slice(0, 50).map(l => `<tr>
-      <td><strong>${l.code}</strong></td>
-      <td style="font-size:11px;color:var(--muted)">${l.lot || '—'}</td>
-      <td>${new Date(l.expiry + 'T00:00:00').toLocaleDateString('pt-BR')}</td>
-    </tr>`).join('') + (items.length > 50 ? `<tr><td colspan="3" class="empty">… e mais ${items.length - 50} lotes</td></tr>` : '');
-  document.getElementById('prev-lots-count').textContent =
-    `${items.length} lotes · substitui a lista atual (${paLots.length} lotes) · saldo vem do estoque`;
-}
-
-function cancelLotsImport() {
-  pendingLots = null;
-  const prev = document.getElementById('prev-lots');
-  if (prev) prev.classList.remove('visible');
-  const fi = document.getElementById('fi-lots');
-  if (fi) fi.value = '';
-}
-
-async function applyLotsImport() {
-  if (!pendingLots) return;
-  showLoading('Atualizando lotes…');
-  try {
-    const now = new Date().toISOString();
-    paLots = pendingLots.items.map(l => ({ ...l, updatedAt: now }));
-    const ok = await savePaLots();
-    if (ok) showToast(`Lotes atualizados: ${paLots.length} lotes com validade`);
-    cancelLotsImport();
-    if (activeTab === 'alertas') renderAlertas();
-  } finally {
-    hideLoading();
-  }
 }
 
 /* ── Boot ── */
