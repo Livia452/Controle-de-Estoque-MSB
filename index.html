@@ -6,6 +6,7 @@
 <title>Estoque de Produto Acabado — PCP</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
@@ -3620,7 +3621,7 @@ function renderAlertas() {
           ${!paLots.length ? `<p class="last-update">Importe os lotes com validade na aba <strong>Atualizar estoque (PCP)</strong> → Importar validade (lotes)</p>` : ''}
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="btn btn-ghost" id="btn-alertas-export"><i class="ti ti-download"></i> Exportar CSV (${isVal ? 'validade' : 'slow moving'})</button>
+          <button class="btn btn-ghost" id="btn-alertas-export"><i class="ti ti-download"></i> Exportar Excel (${isVal ? 'validade' : 'slow moving'})</button>
         </div>
       </div>
 
@@ -3755,33 +3756,103 @@ function renderAlertas() {
   document.getElementById('alertas-family')?.addEventListener('change', e => { alertasFilters.family = e.target.value; renderAlertas(); });
   document.getElementById('alertas-crit')?.addEventListener('change',   e => { alertasFilters.crit   = e.target.value; renderAlertas(); });
   document.getElementById('btn-alertas-export')?.addEventListener('click', () => {
-    if (alertasTab === 'validade') exportValidadeCSV(valRows, products);
-    else exportSlowMovingCSV(slowRows);
+    if (alertasTab === 'validade') exportValidadeXLSX(valRows, products);
+    else exportSlowMovingXLSX(slowRows);
   });
 }
 
-function exportValidadeCSV(rows, products) {
-  const header = ['Código', 'Descrição', 'Lote', 'Família', 'Qtd', 'Validade', 'Dias restantes', 'Criticidade'];
-  const lines = rows.map(l => {
-    const p = products.get(l.code.toUpperCase());
-    return [l.code, `"${p?.description || ''}"`, l.lot || '', `"${p?.family || ''}"`, l.qty || 0,
-      new Date(l.expiry + 'T00:00:00').toLocaleDateString('pt-BR'), l.days, LOT_CRIT[lotCrit(l.days)].label].join(',');
+/* Cores dos badges de criticidade na tela, reaproveitadas no preenchimento das
+   linhas do Excel — mesmo código de cor em tela e planilha. */
+const XLSX_CRIT_FILL = {
+  vencido:   'FFFEECEC', critico:  'FFFEECEC', // --danger-bg
+  atencao:   'FFFEF3E2',                        // --warn-bg
+  monitorar: 'FFE8F1FB',                        // --high-bg
+};
+const XLSX_HEADER_FILL = 'FF2D7D8C'; // --accent-dark
+
+function styleHeaderRow(row) {
+  row.eachCell(c => {
+    c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XLSX_HEADER_FILL } };
+    c.alignment = { vertical: 'middle' };
+    c.border = { bottom: { style: 'thin', color: { argb: 'FFFFFFFF' } } };
   });
-  const csv = [header.join(','), ...lines].join('\n');
-  const a = Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv), download: `validade_lotes_${new Date().toISOString().slice(0, 10)}.csv` });
-  a.click();
+  row.height = 20;
 }
-function exportSlowMovingCSV(rows) {
-  const header = ['Código', 'Descrição', 'Família', 'Estoque', 'Giro anualizado', 'Cobertura (m)', 'Última saída', 'Situação'];
-  const lines = rows.map(({ p, giro }) => {
+
+async function downloadWorkbook(wb, filename) {
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  Object.assign(document.createElement('a'), { href: url, download: filename }).click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function exportValidadeXLSX(rows, products) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Controle de Estoque MSB';
+  wb.created = new Date();
+  const ws = wb.addWorksheet('Validade', { views: [{ state: 'frozen', ySplit: 1 }] });
+  ws.columns = [
+    { header: 'Código',         key: 'code',   width: 14 },
+    { header: 'Descrição',      key: 'desc',   width: 46 },
+    { header: 'Lote',           key: 'lot',    width: 16 },
+    { header: 'Família',        key: 'family', width: 26 },
+    { header: 'Qtd',            key: 'qty',    width: 10 },
+    { header: 'Validade',       key: 'expiry', width: 13 },
+    { header: 'Dias restantes', key: 'days',   width: 14 },
+    { header: 'Criticidade',    key: 'crit',   width: 14 },
+  ];
+  styleHeaderRow(ws.getRow(1));
+  rows.forEach(l => {
+    const p = products.get(l.code.toUpperCase());
+    const ck = lotCrit(l.days);
+    const row = ws.addRow({
+      code: l.code, desc: p?.description || '', lot: l.lot || '', family: p?.family || '',
+      qty: l.qty || 0, expiry: new Date(l.expiry + 'T00:00:00'), days: l.days, crit: LOT_CRIT[ck].label,
+    });
+    row.getCell('expiry').numFmt = 'dd/mm/yyyy';
+    row.getCell('qty').numFmt = '#,##0';
+    const fill = XLSX_CRIT_FILL[ck];
+    if (fill) row.eachCell(c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } }; });
+  });
+  ws.autoFilter = { from: 'A1', to: 'H1' };
+  await downloadWorkbook(wb, `validade_lotes_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+async function exportSlowMovingXLSX(rows) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Controle de Estoque MSB';
+  wb.created = new Date();
+  const ws = wb.addWorksheet('Slow moving', { views: [{ state: 'frozen', ySplit: 1 }] });
+  ws.columns = [
+    { header: 'Código',           key: 'code',   width: 14 },
+    { header: 'Descrição',        key: 'desc',   width: 46 },
+    { header: 'Família',          key: 'family', width: 26 },
+    { header: 'Estoque',          key: 'stock',  width: 11 },
+    { header: 'Giro anualizado',  key: 'giro',   width: 15 },
+    { header: 'Cobertura (m)',    key: 'cov',    width: 14 },
+    { header: 'Última saída',     key: 'last',   width: 13 },
+    { header: 'Situação',         key: 'sit',    width: 13 },
+  ];
+  styleHeaderRow(ws.getRow(1));
+  rows.forEach(({ p, giro }) => {
     const lastMk = paLastSaleMonth(p);
     const cov = coverage(p);
-    return [p.code, `"${p.description}"`, `"${p.family || ''}"`, p.stock || 0, giro.toFixed(2),
-      Number.isFinite(cov) ? cov.toFixed(1) : '', lastMk ? fmtMonthKey(lastMk) : '', giro < 1 ? 'Sem giro' : 'Giro baixo'].join(',');
+    const semGiro = giro < 1;
+    const row = ws.addRow({
+      code: p.code, desc: p.description, family: p.family || '', stock: p.stock || 0,
+      giro: Number(giro.toFixed(2)), cov: Number.isFinite(cov) ? Number(cov.toFixed(1)) : null,
+      last: lastMk ? fmtMonthKey(lastMk) : '', sit: semGiro ? 'Sem giro' : 'Giro baixo',
+    });
+    row.getCell('stock').numFmt = '#,##0';
+    row.getCell('giro').numFmt = '0.00"x"';
+    row.getCell('cov').numFmt = '0.0';
+    const fill = semGiro ? XLSX_CRIT_FILL.vencido : XLSX_CRIT_FILL.atencao;
+    row.eachCell(c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } }; });
   });
-  const csv = [header.join(','), ...lines].join('\n');
-  const a = Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,﻿' + encodeURIComponent(csv), download: `slow_moving_${new Date().toISOString().slice(0, 10)}.csv` });
-  a.click();
+  ws.autoFilter = { from: 'A1', to: 'H1' };
+  await downloadWorkbook(wb, `slow_moving_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
 /* ── Importação de lotes com validade ─────────────────────────────────────
