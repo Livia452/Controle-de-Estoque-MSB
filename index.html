@@ -2002,6 +2002,7 @@ const MEMS_SEED = [
   {code:'MP0000493',desc:'CAT BALAO P/ANG TRAN PER BALAO 6MMX60MM COMP 150CM C/FG 0.01',type:'MP',family:'CATETER BALAO PTA',supplier:'APT',origin:'Brasil',leadTime:5},
   {code:'MP0000547',desc:'CAT BALAO P/ANG PER BALAO 3MMX80MM COMP150CM C/FG 0.018',type:'MP',family:'CATETER BALAO PTA',supplier:'APT',origin:'Brasil',leadTime:5},
   {code:'MP0000550',desc:'CAT BALAO P/ANG PER BALAO 4MMX80MM COMP150CM C/FG 0.018',type:'MP',family:'CATETER BALAO PTA',supplier:'APT',origin:'Brasil',leadTime:5},
+  {code:'MP0000549',desc:'CAT BALAO P/ANG PER BALAO 4MMX60MM COMP150CM C/FG 0.018',type:'MP',family:'CATETER BALAO PTA',supplier:'APT',origin:'Brasil',leadTime:5},
   {code:'MP0000556',desc:'CAT BALAO P/ANG PER BALAO 7MMX80MM COMP135CM C/FG 0.035',type:'MP',family:'CATETER BALAO PTA',supplier:'APT',origin:'Brasil',leadTime:5},
   {code:'MP0000477',desc:'CAT BALAO P/ANG TRAN PER BALAO 2MMX40MM COMP 150CM C/FG 0.01',type:'MP',family:'CATETER BALAO PTA',supplier:'APT',origin:'Brasil',leadTime:5},
   {code:'MP0000478',desc:'CAT BALAO P/ANG TRAN PER BALAO 2.5MMX40MM COMP 150CM C/FG 0.',type:'MP',family:'CATETER BALAO PTA',supplier:'APT',origin:'Brasil',leadTime:5},
@@ -2279,6 +2280,21 @@ async function saveMemsItems(items) {
   if (!rows.length) return;
   const { error } = await sb.from('materials').upsert(rows.map(materialItemToRow));
   if (error) showToast('Erro ao salvar materiais: ' + error.message, 'err');
+}
+
+/* Insere material novo do MEMS_SEED que ainda não está cadastrado — loadMemsItems
+   só semeia a tabela inteira quando ela está totalmente vazia, então um material
+   adicionado ao seed depois (ex.: código que só aparecia num relatório e nunca
+   tinha cadastro formal) nunca chegava no banco sozinho. Não mexe em item já
+   cadastrado. */
+async function syncMemsSeedAdditions() {
+  if (!isLoggedIn() || !memsItems.length) return;
+  const existing = new Set(memsItems.map(i => i.code.toUpperCase()));
+  const missing = MEMS_SEED.filter(i => !existing.has(i.code.toUpperCase()));
+  if (!missing.length) return;
+  const newItems = missing.map(i => ({ ...i, stock:0, stockRetrabalho:0, avgForecast:0, avgConsumption:0, inTransit:0, consumoHistory:{}, forecastHistory:{}, transitEntries:[] }));
+  await saveMemsItems(newItems);
+  memsItems = [...memsItems, ...newItems];
 }
 
 let memsItems = [];
@@ -4410,6 +4426,7 @@ async function boot() {
     paLots       = lots;
     paLotStock   = lotStock;
     slowMovingCurated = slowMoving;
+    await syncMemsSeedAdditions();
     await syncSlowMovingSeed();
   } catch (err) {
     showToast('Erro ao carregar dados: ' + err.message, 'err');
