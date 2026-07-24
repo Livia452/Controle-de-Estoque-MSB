@@ -1103,18 +1103,18 @@ function buildKpis(products) {
   Object.keys(STATUS).forEach(k => { counts[STATUS[k]] = 0; });
   products.forEach(p => counts[productStatus(p)]++);
   const saNote = dashFilters.includeSA && totalSA > 0 ? ` + ${fmt.int(totalSA)} SA` : '';
-  const card = (dot, label, val, sub, cls='') => `
+  const card = (dot, label, val, sub, cls='', onclick='') => `
     <div class="kpi">
-      <p class="kpi-label">${dot} ${label}</p>
+      <p class="kpi-label${onclick?' clickable-cell':''}"${onclick?` onclick="${onclick}" title="Ver conteúdo"`:''}>${dot} ${label}</p>
       <p class="kpi-value ${cls}">${val}</p>
       <p class="kpi-sub">${sub}</p>
     </div>`;
   return `<div class="kpi-grid" style="grid-template-columns:repeat(5,1fr)">
-    ${card('📦','Total em estoque', fmt.int(totalEff)+' un', `${fmt.int(totalPA)} PA${saNote} · ${products.length} produtos`)}
-    ${card('📅','Cobertura média (c/vendas)', fmt.cov(avgCov), withData.length+' produtos c/ dados')}
-    ${card('🔴','Crítico',  counts.crit,   '&lt; 1 mês',   counts.crit>0  ?'text-danger':'')}
-    ${card('🟡','Atenção',  counts.warn,   '1 – 2 meses',  counts.warn>0  ?'text-warn':'')}
-    ${card('🔵','Alto / Excessivo', counts.high+counts.excess, '&gt; 6 meses', '')}
+    ${card('📦','Total em estoque', fmt.int(totalEff)+' un', `${fmt.int(totalPA)} PA${saNote} · ${products.length} produtos`, '', 'dashShowAllProducts()')}
+    ${card('📅','Cobertura média (c/vendas)', fmt.cov(avgCov), withData.length+' produtos c/ dados', '', 'openDashCoverageModal()')}
+    ${card('🔴','Crítico',  counts.crit,   '&lt; 1 mês',   counts.crit>0  ?'text-danger':'', `dashFilterByStatus('${STATUS.CRIT}')`)}
+    ${card('🟡','Atenção',  counts.warn,   '1 – 2 meses',  counts.warn>0  ?'text-warn':'', `dashFilterByStatus('${STATUS.WARN}')`)}
+    ${card('🔵','Alto / Excessivo', counts.high+counts.excess, '&gt; 6 meses', '', `dashFilterByStatus(['${STATUS.HIGH}','${STATUS.EXCESS}'])`)}
   </div>`;
 }
 
@@ -1333,7 +1333,7 @@ function applyFilters(products) {
   const q = dashFilters.search.trim().toLowerCase();
   if (q)                      list = list.filter(p => p.code.toLowerCase().includes(q) || p.description.toLowerCase().includes(q));
   if (dashFilters.family)     list = list.filter(p => p.family === dashFilters.family);
-  if (dashFilters.status)     list = list.filter(p => productStatus(p) === dashFilters.status);
+  if (dashFilters.status)     list = list.filter(p => Array.isArray(dashFilters.status) ? dashFilters.status.includes(productStatus(p)) : productStatus(p) === dashFilters.status);
   if (dashFilters.hideZeroSales) list = list.filter(p => avgConsumption(p) > 0);
   return list;
 }
@@ -1351,6 +1351,7 @@ function renderDashboard() {
       <button class="btn btn-primary btn-sm" id="btn-share"><i class="ti ti-share" aria-hidden="true"></i> Compartilhar</button>
     </div>
     ${buildKpis(all)}
+    <div id="dash-table-anchor"></div>
     ${buildFilterBar(all.length, filtered.length)}
     ${buildTable(filtered)}
     ${buildChartSection()}
@@ -2754,6 +2755,13 @@ function exportMemsCSV(items) {
   a.click();
 }
 
+/* ── KPI clicável — Controle de Matérias ── */
+function memsFilterByStatus(status) {
+  memsFilters.status = status;
+  renderMems();
+  scrollToAnchor('mems-table-anchor');
+}
+
 function renderMems() {
   // Visibilidade da coluna é só o que está marcado em "Colunas" — independente
   // de qual lado (real x forecast) está sendo usado no cálculo efetivo (ver
@@ -2824,7 +2832,7 @@ function renderMems() {
       <div class="kpi-grid" style="grid-template-columns:repeat(6,1fr)">
         ${['crit','warn','ok','high','excess','nogiro'].map(s => {
           const m = STATUS_META[s]; const c = counts[s]||0;
-          return `<div class="kpi"><div class="kpi-label">${m.dot} ${m.label}</div><div class="kpi-value ${c>0&&s==='crit'?'text-danger':s==='warn'&&c>0?'text-warn':''}">${c}</div></div>`;
+          return `<div class="kpi"><div class="kpi-label clickable-cell" onclick="memsFilterByStatus('${s}')" title="Ver conteúdo">${m.dot} ${m.label}</div><div class="kpi-value ${c>0&&s==='crit'?'text-danger':s==='warn'&&c>0?'text-warn':''}">${c}</div></div>`;
         }).join('')}
       </div>
 
@@ -2845,6 +2853,7 @@ function renderMems() {
           <p style="margin-top:10px;color:var(--hint)">Nenhum cadastro importado.<br>Clique em <strong>Importar Cadastro</strong> para carregar o arquivo de cobertura com os produtos ME, MP e MS.</p>
         </div></div>
       ` : `
+      <div id="mems-table-anchor"></div>
       <div class="chart-view-tabs" style="margin-bottom:16px">
         <button class="chart-view-btn ${!memsFilters.type?'active':''}" data-mtype="">Todos <span style="opacity:.65">${memsItems.length}</span></button>
         <button class="chart-view-btn ${memsFilters.type==='MP'?'active':''}" data-mtype="MP">MP · Matéria-Prima <span style="opacity:.65">${typeCounts.MP||0}</span></button>
@@ -3978,6 +3987,19 @@ function slowMovingCuratedRows() {
   return rows.sort((a, b) => b.valorTotal - a.valorTotal);
 }
 
+/* ── KPIs clicáveis — Alertas de Estoque ── */
+function alertasGotoValidade(critFilter) {
+  alertasTab = 'validade';
+  alertasFilters.crit = critFilter;
+  renderAlertas();
+  scrollToAnchor('alertas-table-anchor');
+}
+function alertasGotoSlow() {
+  alertasTab = 'slow';
+  renderAlertas();
+  scrollToAnchor('alertas-table-anchor');
+}
+
 /* ── Render da aba ── */
 const SLOW_STATUS_BADGE = {
   'Slow Moving':             { cls: 'b-warn', label: 'Slow Moving' },
@@ -4037,32 +4059,33 @@ function renderAlertas() {
 
       <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(210px,1fr))">
         <div class="kpi" style="${criticos.length ? 'border-color:var(--danger-text)' : ''}">
-          <div class="kpi-label">🔴 Lotes críticos</div>
+          <div class="kpi-label clickable-cell" onclick="alertasGotoValidade(['vencido','critico'])" title="Ver conteúdo">🔴 Lotes críticos</div>
           <div class="kpi-value ${criticos.length ? 'text-danger' : ''}">${criticos.length}</div>
           <div class="kpi-sub">vencido ou &lt; 6 meses · ${fmt.int(critUnits)} un</div>
         </div>
         <div class="kpi">
-          <div class="kpi-label">📅 Vencendo em 1,5 ano</div>
+          <div class="kpi-label clickable-cell" onclick="alertasGotoValidade([])" title="Ver conteúdo">📅 Vencendo em 1,5 ano</div>
           <div class="kpi-value">${lots.length}</div>
           <div class="kpi-sub">${fmt.int(lotsUnits)} unidades no total</div>
         </div>
         <div class="kpi" style="${slowAll.length ? 'border-color:var(--warn-text)' : ''}">
-          <div class="kpi-label">🐌 Itens slow moving</div>
+          <div class="kpi-label clickable-cell" onclick="alertasGotoSlow()" title="Ver conteúdo">🐌 Itens slow moving</div>
           <div class="kpi-value ${slowAll.length ? 'text-warn' : ''}">${slowAll.length}</div>
           <div class="kpi-sub">análise PCP/comercial</div>
         </div>
         <div class="kpi">
-          <div class="kpi-label">📦 Unidades paradas</div>
+          <div class="kpi-label clickable-cell" onclick="alertasGotoSlow()" title="Ver conteúdo">📦 Unidades paradas</div>
           <div class="kpi-value">${fmt.int(slowUnitsPA)} <span style="font-size:13px;color:var(--muted)">PA</span> · ${fmt.int(slowUnitsMP)} <span style="font-size:13px;color:var(--muted)">MP</span></div>
           <div class="kpi-sub">estoque ao vivo nos itens slow moving</div>
         </div>
         <div class="kpi">
-          <div class="kpi-label">💰 Valor na análise</div>
+          <div class="kpi-label clickable-cell" onclick="alertasGotoSlow()" title="Ver conteúdo">💰 Valor na análise</div>
           <div class="kpi-value">${fmt.brl(slowValor)}</div>
           <div class="kpi-sub">valor de estoque na data do relatório</div>
         </div>
       </div>
 
+      <div id="alertas-table-anchor"></div>
       <div class="chart-view-tabs" style="margin-bottom:16px">
         <button class="chart-view-btn ${isVal ? 'active' : ''}" data-alertas-tab="validade">Produtos com validade próxima <span style="opacity:.65">${lots.length}</span></button>
         <button class="chart-view-btn ${!isVal ? 'active' : ''}" data-alertas-tab="slow">Slow moving <span style="opacity:.65">${slowAll.length}</span></button>
@@ -4794,6 +4817,59 @@ function memsAnticipationDisplayInfo(item) {
     return { stockoutDate: new Date(Date.now() + worst.monthsLeft * 30.44 * 86400000), note: `ramo ${worst.final}` };
   }
   return { stockoutDate: memsStockoutDate(item), note: null };
+}
+
+/* Modal genérico pra "ver o conteúdo que gerou esse dado" — usado pelos
+   KPIs que não têm um filtro 1:1 já pronto na tela (ex.: cobertura média,
+   que é uma média, não um subconjunto simples de filtrar). */
+function openDetailModal(title, subtitleHtml, theadHtml, tbodyRowsHtml, colspan) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = `
+    ${subtitleHtml ? `<p style="font-size:13px;color:var(--muted);margin-bottom:16px">${subtitleHtml}</p>` : ''}
+    <div class="tbl-wrap" style="margin-bottom:0">
+      <table>
+        <thead>${theadHtml}</thead>
+        <tbody>${tbodyRowsHtml || `<tr><td colspan="${colspan}" class="empty">Nenhum item.</td></tr>`}</tbody>
+      </table>
+    </div>
+    <div class="form-actions" style="margin-top:16px">
+      <button class="btn btn-primary" id="btn-modal-cancel">Fechar</button>
+    </div>`;
+  document.getElementById('btn-modal-cancel').addEventListener('click', closeProductModal);
+  const modalBox = document.querySelector('#modal-overlay .modal');
+  if (modalBox) modalBox.style.maxWidth = '760px';
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+function scrollToAnchor(id) {
+  requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+}
+
+/* ── KPIs clicáveis — Painel de indicadores ── */
+function dashFilterByStatus(status) {
+  dashFilters.status = status;
+  renderDashboard();
+  scrollToAnchor('dash-table-anchor');
+}
+function dashShowAllProducts() {
+  dashFilters = { ...dashFilters, search: '', family: '', status: '' };
+  renderDashboard();
+  scrollToAnchor('dash-table-anchor');
+}
+function openDashCoverageModal() {
+  const withData = state.getAll().filter(p => avgConsumption(p) > 0).sort((a, b) => coverage(a) - coverage(b));
+  const rows = withData.map(p => `<tr>
+    <td><strong>${p.code}</strong></td>
+    <td class="td-desc"><div title="${p.description}">${p.description}</div></td>
+    <td class="num-c">${fmt.int(avgConsumption(p))}/mês</td>
+    <td class="num-c">${fmt.cov(coverage(p))}</td>
+  </tr>`).join('');
+  openDetailModal(
+    `Cobertura média — ${withData.length} produtos com dados`,
+    'Produtos com consumo médio registrado (últimos 6 meses) — a média desses valores de cobertura é o número mostrado no card.',
+    `<tr><th>Código</th><th>Descrição</th><th class="num-c">Consumo médio</th><th class="num-c">Cobertura</th></tr>`,
+    rows, 4
+  );
 }
 
 function openMemsAlertModal(type) {
