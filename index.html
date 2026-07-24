@@ -518,6 +518,7 @@ const FAMILY_LINE_MAP = {
   'ETIQUETA':'Geral', 'TYVEK':'Geral',
 };
 function productLine(p) { return FAMILY_LINE_MAP[p.family] || '—'; }
+const LINHAS = [...new Set(Object.values(FAMILY_LINE_MAP))].sort();
 
 /* Colunas esperadas nos arquivos de importação */
 const COL_STOCK = {
@@ -1143,6 +1144,8 @@ function buildAlert() { return ''; }
 function buildFilterBar(total, shown) {
   const opts = FAMILIES.map(f =>
     `<option value="${f}" ${dashFilters.family===f?'selected':''}>${f}</option>`).join('');
+  const linhaOpts = LINHAS.map(l =>
+    `<option value="${l}" ${dashFilters.linha===l?'selected':''}>${l}</option>`).join('');
   const statusOpts = Object.entries(STATUS_META).map(([k,m]) =>
     `<option value="${k}" ${dashFilters.status===k?'selected':''}>${m.dot} ${m.label}</option>`).join('');
   const diff = total !== shown ? `<span class="filter-results">${shown} de ${total} produtos</span>` : `<span class="filter-results">${total} produtos</span>`;
@@ -1153,6 +1156,9 @@ function buildFilterBar(total, shown) {
     </div>
     <select class="filter-select" id="f-dash-family">
       <option value="">Todas as famílias</option>${opts}
+    </select>
+    <select class="filter-select" id="f-dash-linha">
+      <option value="">Todas as linhas</option>${linhaOpts}
     </select>
     <select class="filter-select" id="f-dash-status">
       <option value="">Todos os status</option>${statusOpts}
@@ -1307,7 +1313,7 @@ async function generateShareFile() {
    DASHBOARD VIEW
 ═══════════════════════════════════════════════ */
 const dashEl = document.getElementById('view-dashboard');
-let dashFilters = { search: '', family: '', status: '', hideZeroSales: false, includeSA: true };
+let dashFilters = { search: '', family: '', linha: '', status: '', hideZeroSales: false, includeSA: true };
 let chartView = 'curva-a';
 const CURVA_A_FAMILIES = ['SONDA BASKET', 'FIBRA LASER UROLOGIA', 'ELETRODO TEMPORARIO'];
 
@@ -1354,6 +1360,7 @@ function applyFilters(products) {
   const q = dashFilters.search.trim().toLowerCase();
   if (q)                      list = list.filter(p => p.code.toLowerCase().includes(q) || p.description.toLowerCase().includes(q));
   if (dashFilters.family)     list = list.filter(p => p.family === dashFilters.family);
+  if (dashFilters.linha)      list = list.filter(p => productLine(p) === dashFilters.linha);
   if (dashFilters.status)     list = list.filter(p => Array.isArray(dashFilters.status) ? dashFilters.status.includes(productStatus(p)) : productStatus(p) === dashFilters.status);
   if (dashFilters.hideZeroSales) list = list.filter(p => avgConsumption(p) > 0);
   return list;
@@ -1389,6 +1396,7 @@ function renderDashboard() {
     }, 220);
   });
   document.getElementById('f-dash-family')?.addEventListener('change', e => { dashFilters.family = e.target.value; renderDashboard(); });
+  document.getElementById('f-dash-linha')?.addEventListener('change', e => { dashFilters.linha = e.target.value; renderDashboard(); });
   document.getElementById('f-dash-status')?.addEventListener('change', e => { dashFilters.status = e.target.value; renderDashboard(); });
   document.getElementById('f-dash-zero')?.addEventListener('change', e => { dashFilters.hideZeroSales = e.target.checked; renderDashboard(); });
   document.getElementById('f-dash-sa')?.addEventListener('change', e => { dashFilters.includeSA = e.target.checked; renderDashboard(); });
@@ -3732,7 +3740,7 @@ let paLots = [];            // [{ code, lot, expiry: 'YYYY-MM-DD', updatedAt }] 
 let paLotStock = {};        // "CÓDIGO|LOTE" -> qty (saldo atual, vem da importação de estoque)
 let pendingLots = null;     // importação em andamento
 let alertasTab = 'validade';
-let alertasFilters = { search: '', family: '', crit: [] }; // crit: array — vazio = todas
+let alertasFilters = { search: '', family: '', linha: '', crit: [] }; // crit: array — vazio = todas
 let alertasSort = { key: 'days', dir: 'asc' }; // ordenação clicável da tabela de validade
 
 const ALERTAS_SORT_GETTERS = {
@@ -4051,6 +4059,7 @@ function renderAlertas() {
     .filter(l => {
       const p = products.get(l.code.toUpperCase());
       if (alertasFilters.family && (p?.family || '') !== alertasFilters.family) return false;
+      if (alertasFilters.linha && (p ? productLine(p) : '—') !== alertasFilters.linha) return false;
       if (alertasFilters.crit.length && !alertasFilters.crit.includes(lotCrit(l.days))) return false;
       if (q) return l.code.toLowerCase().includes(q) || (l.lot || '').toLowerCase().includes(q)
                  || (p?.description || '').toLowerCase().includes(q);
@@ -4059,6 +4068,7 @@ function renderAlertas() {
 
   const slowRows = slowAll.filter(r => {
     if (alertasFilters.family && r.familia !== alertasFilters.family) return false;
+    if (alertasFilters.linha && (FAMILY_LINE_MAP[r.familia] || '—') !== alertasFilters.linha) return false;
     if (q) return (r.paCode || '').toLowerCase().includes(q) || r.descricao.toLowerCase().includes(q)
                || r.mps.some(m => m.code.toLowerCase().includes(q) || m.descricao.toLowerCase().includes(q));
     return true;
@@ -4120,6 +4130,10 @@ function renderAlertas() {
         <select class="filter-select" id="alertas-family">
           <option value="">Todas as famílias</option>
           ${(isVal ? families : slowFamilies).map(f => `<option value="${f}" ${alertasFilters.family === f ? 'selected' : ''}>${f}</option>`).join('')}
+        </select>
+        <select class="filter-select" id="alertas-linha">
+          <option value="">Todas as linhas</option>
+          ${LINHAS.map(l => `<option value="${l}" ${alertasFilters.linha === l ? 'selected' : ''}>${l}</option>`).join('')}
         </select>
         ${isVal ? `
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
@@ -4223,6 +4237,7 @@ function renderAlertas() {
     clearTimeout(_at); _at = setTimeout(() => { alertasFilters.search = e.target.value; renderAlertas(); }, 220);
   });
   document.getElementById('alertas-family')?.addEventListener('change', e => { alertasFilters.family = e.target.value; renderAlertas(); });
+  document.getElementById('alertas-linha')?.addEventListener('change', e => { alertasFilters.linha = e.target.value; renderAlertas(); });
   document.querySelectorAll('[data-crit-chip]').forEach(chip => {
     chip.addEventListener('click', () => {
       const key = chip.dataset.critChip;
