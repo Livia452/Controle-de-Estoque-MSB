@@ -3879,28 +3879,46 @@ async function loadSlowMoving() {
     observacao: r.observacao, paExcelValor: r.pa_valor_ref, mps: r.mp_codes || [],
   }));
 }
-async function seedSlowMovingIfEmpty() {
-  if (slowMovingCurated.length || !isLoggedIn()) return;
-  const rows = SLOW_MOVING_SEED.map(g => ({
+function slowMovingSeedRow(g) {
+  return {
     pa_code: g.paCode, familia: g.familia, descricao: g.descricao, status: g.status,
     observacao: g.observacao, pa_valor_ref: g.paExcelValor, mp_codes: g.mps,
-  }));
-  const { error } = await sb.from('slow_moving_analysis').insert(rows);
-  if (error) { console.warn('Não deu para semear slow_moving_analysis:', error.message); return; }
-  slowMovingCurated = SLOW_MOVING_SEED;
+  };
 }
 
-/* Remove do banco os grupos que saíram do SLOW_MOVING_SEED desde a última
-   vez (ex.: item já resolvido/retirado da curadoria) — mantém o banco em
-   sincronia sempre que o seed é editado, sem precisar de ação manual. */
-async function pruneRemovedSlowMoving() {
-  if (!isLoggedIn() || !slowMovingCurated.length) return;
-  const validCodes = new Set(SLOW_MOVING_SEED.map(g => g.paCode));
-  const stale = slowMovingCurated.filter(g => !validCodes.has(g.paCode));
-  if (!stale.length) return;
-  const { error } = await sb.from('slow_moving_analysis').delete().in('pa_code', stale.map(g => g.paCode));
-  if (error) { console.warn('Não deu para limpar slow_moving_analysis:', error.message); return; }
-  slowMovingCurated = slowMovingCurated.filter(g => validCodes.has(g.paCode));
+/* Mantém o banco em sincronia com SLOW_MOVING_SEED sempre que o código é
+   editado: insere grupo novo, remove grupo que saiu do seed, e ATUALIZA o
+   conteúdo (mps, status, valores...) de grupo que já existia mas mudou.
+   Substitui o antigo par seed-once/prune, que só comparava por paCode —
+   editar só a lista de materiais de um grupo existente nunca chegava no
+   banco porque o grupo em si continuava lá. */
+async function syncSlowMovingSeed() {
+  if (!isLoggedIn()) return;
+  const seedRows  = SLOW_MOVING_SEED.map(slowMovingSeedRow);
+  const seedCodes = new Set(seedRows.map(r => r.pa_code));
+  const dbByCode  = new Map(slowMovingCurated.map(g => [g.paCode, slowMovingSeedRow(g)]));
+
+  const toInsert = seedRows.filter(r => !dbByCode.has(r.pa_code));
+  const toDelete = [...dbByCode.keys()].filter(code => !seedCodes.has(code));
+  const toUpdate = seedRows.filter(r => {
+    const prev = dbByCode.get(r.pa_code);
+    return prev && JSON.stringify(prev) !== JSON.stringify(r);
+  });
+  if (!toInsert.length && !toDelete.length && !toUpdate.length) return;
+
+  if (toDelete.length) {
+    const { error } = await sb.from('slow_moving_analysis').delete().in('pa_code', toDelete);
+    if (error) { console.warn('Não deu para limpar slow_moving_analysis:', error.message); return; }
+  }
+  if (toInsert.length) {
+    const { error } = await sb.from('slow_moving_analysis').insert(toInsert);
+    if (error) { console.warn('Não deu para semear slow_moving_analysis:', error.message); return; }
+  }
+  if (toUpdate.length) {
+    const { error } = await sb.from('slow_moving_analysis').upsert(toUpdate);
+    if (error) { console.warn('Não deu para atualizar slow_moving_analysis:', error.message); return; }
+  }
+  slowMovingCurated = SLOW_MOVING_SEED;
 }
 
 /* Junta a classificação curada com o estoque AO VIVO (PA + materiais) —
@@ -4392,8 +4410,7 @@ async function boot() {
     paLots       = lots;
     paLotStock   = lotStock;
     slowMovingCurated = slowMoving;
-    await seedSlowMovingIfEmpty();
-    await pruneRemovedSlowMoving();
+    await syncSlowMovingSeed();
   } catch (err) {
     showToast('Erro ao carregar dados: ' + err.message, 'err');
   } finally {
