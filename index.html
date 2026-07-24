@@ -518,7 +518,7 @@ const FAMILY_LINE_MAP = {
   'ETIQUETA':'Geral', 'TYVEK':'Geral',
 };
 function productLine(p) { return FAMILY_LINE_MAP[p.family] || '—'; }
-const LINHAS = [...new Set(Object.values(FAMILY_LINE_MAP))].sort();
+const LINHAS = [...new Set(Object.values(FAMILY_LINE_MAP))].filter(l => l !== 'Geral' && l !== 'Material de Embalagem').sort();
 
 /* Colunas esperadas nos arquivos de importação */
 const COL_STOCK = {
