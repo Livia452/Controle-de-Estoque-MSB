@@ -91,6 +91,23 @@ create table if not exists pa_lot_stock (
   primary key (code, lot)
 );
 
+-- ── SLOW MOVING (aba Alertas de Estoque) ──────────────────────────────
+-- Análise curada (PCP/comercial), carregada uma única vez a partir do
+-- relatório de estratificação de estoque — não é reimportável pela UI.
+-- Quantidades exibidas na tela vêm sempre ao vivo (pa_products / materials);
+-- esta tabela guarda só a classificação (PA x MP, status, observação) e o
+-- valor de estoque de referência (congelado na data da análise).
+create table if not exists slow_moving_analysis (
+  pa_code     text primary key,  -- código do PA, ou 'SEM_PA::<família>' p/ MPs sem PA vinculado
+  familia     text not null default '',
+  descricao   text not null default '',
+  status      text not null default 'Slow Moving', -- Slow Moving | Retornar para o estoque | Analisar
+  observacao  text not null default '',
+  pa_valor_ref numeric not null default 0, -- valor de estoque do PA na data da análise
+  mp_codes    jsonb not null default '[]'::jsonb,   -- [{ code, descricao, valorExcel }]
+  updated_at  timestamptz not null default now()
+);
+
 -- ── USUÁRIOS / PAPÉIS ──────────────────────────────────────────────────
 -- ligada ao login do Supabase (auth.users); role controla quem vê "Gerenciar usuários"
 create table if not exists profiles (
@@ -112,6 +129,7 @@ alter table materials           enable row level security;
 alter table materials_meta      enable row level security;
 alter table materials_bom       enable row level security;
 alter table materials_bom_stock enable row level security;
+alter table slow_moving_analysis enable row level security;
 alter table profiles            enable row level security;
 
 drop policy if exists pa_lots_read  on pa_lots;
@@ -154,6 +172,12 @@ drop policy if exists materials_bom_stock_read  on materials_bom_stock;
 drop policy if exists materials_bom_stock_write on materials_bom_stock;
 create policy materials_bom_stock_read  on materials_bom_stock for select using (true);
 create policy materials_bom_stock_write on materials_bom_stock for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+drop policy if exists slow_moving_analysis_read  on slow_moving_analysis;
+drop policy if exists slow_moving_analysis_write on slow_moving_analysis;
+create policy slow_moving_analysis_read  on slow_moving_analysis for select using (true);
+create policy slow_moving_analysis_write on slow_moving_analysis for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists profiles_read  on profiles;

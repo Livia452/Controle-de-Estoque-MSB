@@ -915,6 +915,7 @@ const fmt = {
   int:   n   => ptBR.format(Math.round(n)),
   dec:   n   => ptBR1.format(n),
   cov:   n   => Number.isFinite(n) ? ptBR1.format(n) + ' m' : '—',
+  brl:   n   => (n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }),
   dt:    ()  => new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }),
   month: off => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth()+off); return d.toLocaleDateString('pt-BR', { month:'short', year:'2-digit' }); },
 };
@@ -3624,41 +3625,163 @@ function lotsInWindow() {
     .filter(l => l.qty > 0 && state.getByCode(l.code) != null && l.days != null && l.days < LOT_CRIT_DAYS.monitorar);
 }
 
-/* ── Slow moving (calculado, PA) ──────────────────────────────────────────
-   Giro anualizado = (vendas dos últimos 6 meses × 2) ÷ estoque atual.
-   Regra (da proposta de design): giro < 2x/ano = giro baixo · < 1x = sem giro.
-   Só considera itens COM estoque (sem estoque não há capital imobilizado). */
-const SLOW_GIRO_LIMIT = 2;
-function paAnnualTurnover(p) {
-  const stock = p.stock || 0;
-  if (stock <= 0) return null;
-  const sales6m = getMonthlySales(p).reduce((a, b) => a + b, 0);
-  return (sales6m * 2) / stock;
+/* ── Slow moving (curado — análise PCP/comercial) ──────────────────────────
+   Vem do relatório de estratificação de estoque (PA + MP), carregado uma
+   única vez em SLOW_MOVING_SEED — não é reimportável pela UI (a lista de
+   quem está "slow moving" é uma curadoria manual, não um cálculo). Cada
+   grupo é um PA (ou "SEM_PA::<família>" para MPs sem PA vinculado no
+   relatório) com as MPs que o compõem. As QUANTIDADES exibidas são sempre
+   ao vivo — vêm de pa_products / materials, que já são atualizados a cada
+   importação de estoque — só a classificação (status/observação) e o valor
+   de referência vêm congelados da data da análise. */
+const SLOW_MOVING_SEED = [
+  {paCode:'73194',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000448',descricao:'CAT BALAO P/ANG TRAN PER BALAO 7MMX120MM COMP 135CM C/FG 0.0',valorExcel:49073.69}]},
+  {paCode:'RP-IPD-V800',familia:'URETERESCOPIOS FLEXIVEIS',descricao:'PROCESSADOR DE IMAGEM DE VIDEO ENDOSCÓPICO',status:'Slow Moving',observacao:'',paExcelValor:231518.84,mps:[]},
+  {paCode:'53053',familia:'SONDA BASKET',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000536',descricao:'INTRODUTOR P/ CATETER S/ VALVULA 3.0 FR X 3000mm AZUL',valorExcel:34933.95}]},
+  {paCode:'64009',familia:'',descricao:'CAT ELET TEMP MSB 6FRX110CM/125CM DISTÂNCIA POLOS 10MM',status:'Slow Moving',observacao:'',paExcelValor:7918.85,mps:[]},
+  {paCode:'58161',familia:'BAINHA SPEED CROSS',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000235',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 10FRX61CM CURVA 70° D66CM',valorExcel:63692.79}]},
+  {paCode:'73188',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000555',descricao:'CAT BALAO P/ANG PER BALAO 6MMX100MM COMP135CM C/FG 0.035',valorExcel:6737.22}]},
+  {paCode:'73170',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000486',descricao:'CAT BALAO P/ANG TRAN PER BALAO 6MMX60MM COMP 135CM C/FG 0.03',valorExcel:17094.37}]},
+  {paCode:'57109',familia:'INTRODUTOR FEMORAL',descricao:'CONJ INTR CATETER MSB 12FRX10CM D15CM FG0.035"X50CM',status:'Analisar',observacao:'Depósito de devolução',paExcelValor:148.6,mps:[{code:'MP0000322',descricao:'GUIA DE TROCA P/ ANGIOPLAST 0.035"X45CM J TIP',valorExcel:6647.37}]},
+  {paCode:'73343',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000453',descricao:'CAT BALAO P/ANG TRAN PER BALAO 4MMX120MM COMP 150CM C/FG 0.0',valorExcel:13328.15}]},
+  {paCode:'73161',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000473',descricao:'CAT BALAO P/ANG TRAN PER BALAO 6MMX40MM COMP 135CM C/FG 0.03',valorExcel:8061.66}]},
+  {paCode:'73174',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000411',descricao:'CAT BALAO P/ANG TRAN PER BALAO10MMX60MM COMP135CM C/ FG0,035',valorExcel:5303.39}]},
+  {paCode:'USDJ-4726H35S',familia:'KIT DUPLO J',descricao:'KIT SONDA URETERAL MSB DUPLO J 4.7X26 FG 0.035 HIDROFILICO R',status:'Slow Moving',observacao:'',paExcelValor:27414.15,mps:[]},
+  {paCode:'58403',familia:'BAINHA SPEED CROSS TWIST',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000238',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 6.5FRX45CM D63CM DESTINO T',valorExcel:324392.8}]},
+  {paCode:'73197',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 5MMX150MM COMP 135CM C/ FG 0,035',status:'Slow Moving',observacao:'',paExcelValor:45306.76,mps:[]},
+  {paCode:'58034',familia:'BAINHA SPEED CROSS',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000224',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 6FRX70CM D75CM RETO',valorExcel:232.94}]},
+  {paCode:'73198',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000407',descricao:'CAT BALAO P/ANG TRAN PER BALAO6MMX150MM COMP135CM C/ FG0,035',valorExcel:53540.59}]},
+  {paCode:'SEM_PA::CATETER BALAO PTA',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Sem BOM vinculada',paExcelValor:0,mps:[{code:'MP0000549',descricao:'CAT BALAO P/ANG PER BALAO 4MMX60MM COMP150CM C/FG 0.018',valorExcel:6737.22},{code:'MP0000543',descricao:'CAT BALAO P/ANG PER BALAO 2MMX40MM COMP150CM C/FG 0.018',valorExcel:3368.63},{code:'MP0000546',descricao:'CAT BALAO P/ANG PER BALAO 3MMX40MM COMP150CM C/FG 0.018',valorExcel:3368.63}]},
+  {paCode:'73367',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 4MMX200MM COMP150CM C/FG 0.018',status:'Slow Moving',observacao:'',paExcelValor:11076.1,mps:[{code:'MP0000467',descricao:'CAT BALAO P/ANG TRAN PER BALAO 4MMX200MM COMP 150CM C/FG 0.0',valorExcel:7323.39}]},
+  {paCode:'73327',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000550',descricao:'CAT BALAO P/ANG PER BALAO 4MMX80MM COMP150CM C/FG 0.018',valorExcel:6737.22}]},
+  {paCode:'73193',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000406',descricao:'CAT BALAO P/ANG TRAN PER BALAO6MMX120MM COMP135CM C/ FG0,035',valorExcel:31612.7}]},
+  {paCode:'73162',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000474',descricao:'CAT BALAO P/ANG TRAN PER BALAO 7MMX40MM COMP 135CM C/FG 0.03',valorExcel:5493.32}]},
+  {paCode:'73169',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000485',descricao:'CAT BALAO P/ANG TRAN PER BALAO 5MMX60MM COMP 135CM C/FG 0.03',valorExcel:8064.82}]},
+  {paCode:'73164',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000476',descricao:'CAT BALAO P/ANG TRAN PER BALAO 9MMX40MM COMP 135CM C/FG 0.03',valorExcel:10174.4}]},
+  {paCode:'58406',familia:'BAINHA SPEED CROSS TWIST',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000292',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 6.5FRX90CM D108CM DESTINO T',valorExcel:242646.84}]},
+  {paCode:'73172',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 8MMX60MM COMP 135CM C/ FG 0,035',status:'Slow Moving',observacao:'',paExcelValor:9967.55,mps:[]},
+  {paCode:'73209',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 7MMX200MM COMP135CM C/FG 0.035',status:'Slow Moving',observacao:'',paExcelValor:4276.04,mps:[{code:'MP0000462',descricao:'CAT BALAO P/ANG TRAN PER BALAO 7MMX200MM COMP 135CM C/FG 0.0',valorExcel:54200.79}]},
+  {paCode:'73351',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 4MMX150MM COMP150CM C/FG 0.018',status:'Slow Moving',observacao:'',paExcelValor:9579.81,mps:[{code:'MP0000457',descricao:'CAT BALAO P/ANG TRAN PER BALAO 4MMX150MM COMP 150CM C/FG 0.0',valorExcel:13336}]},
+  {paCode:'58148',familia:'BAINHA SPEED CROSS',descricao:'BAINHA INTROD SPEED CROSS MSB 8FRX79CM RETA DILATADOR 84CM',status:'Slow Moving',observacao:'',paExcelValor:50397.53,mps:[{code:'MP0000249',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 8FRX79CM D84CM RETA',valorExcel:9831.51}]},
+  {paCode:'52069',familia:'KIT DUPLO J',descricao:'KIT S.URET MSB DJ 6.0FRX26CM FG HID RT 0.035"X150CM STD',status:'Slow Moving',observacao:'',paExcelValor:354.2,mps:[]},
+  {paCode:'51030',familia:'',descricao:'FIO GUIA MSB HYDRO 0.035"X150CM RETO HIDROFILICO STANDARD',status:'Analisar',observacao:'',paExcelValor:585.63,mps:[]},
+  {paCode:'VCET-4110CK1',familia:'ELETRODO TEMPORARIO',descricao:'',status:'Slow Moving',observacao:'Ver possibilidade de uso',paExcelValor:0,mps:[{code:'MP0000522',descricao:'KIT GUIA DE TROCA P/ ANG INTRODUTOR C/ CANULA EM INOX 4FR',valorExcel:3077.5},{code:'MP0000418',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 4FRX9CM',valorExcel:3776.54}]},
+  {paCode:'58204',familia:'BAINHA SPEED CROSS',descricao:'BAINHA INTROD SPEED CROSS MSB 7FRX45CM C. BALKIN',status:'Slow Moving',observacao:'',paExcelValor:59295.35,mps:[{code:'MP0000339',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 7FRX45CM C180 D50CM',valorExcel:20823.8}]},
+  {paCode:'56010',familia:'IRRIGADOR URETERAL',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000324',descricao:'TUBO TERMO RETRÁTIL 5.0 MM TRANSPARENTE',valorExcel:203.52}]},
+  {paCode:'73180',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000556',descricao:'CAT BALAO P/ANG PER BALAO 7MMX80MM COMP135CM C/FG 0.035',valorExcel:6737.22}]},
+  {paCode:'62038',familia:'FIBRA LASER UROLOGIA',descricao:'',status:'Slow Moving',observacao:'Pedido mínimo alto - Tubo',paExcelValor:0,mps:[{code:'MP0000352',descricao:'TUBO TERMORRETRATIL T2Z 6,4MM AZUL CLARO - ROLO C/ 100M',valorExcel:289.89}]},
+  {paCode:'UAMB-14120',familia:'SONDA BASKET',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000285',descricao:'TUBO PVC ATOXICO BRANCO PARA BAINHA ( 1,35X0,75MM)',valorExcel:1015.93},{code:'MP0000347',descricao:'TUBO TERMORRETRATIL T2Z 3,2MM BRANCO',valorExcel:395.07}]},
+  {paCode:'73331',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000545',descricao:'CAT BALAO P/ANG PER BALAO 2MMX100MM COMP150CM C/FG 0.018',valorExcel:6737.22}]},
+  {paCode:'SEM_PA::',familia:'',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000501',descricao:'ETIQUETA DO LAYOUT DA CÂMARA BOPP',valorExcel:4820.71},{code:'MP0000534',descricao:'ADESIVO AUTOCLAVÁVEL ULTRA 113mmX12mm',valorExcel:0},{code:'MP0000353',descricao:'TUBO TERMORRETRATIL T2Z 2,4MM AZUL ESCURO - ROLO C/ 200M',valorExcel:49.58},{code:'MP0000430',descricao:'CONECTOR PARA CATETER URETERAL DUP RP 2mm',valorExcel:1352.04},{code:'MP0000565',descricao:'CATETER URETERAL 6FRX715MM',valorExcel:562.57}]},
+  {paCode:'72001',familia:'CAMERA DE DRENAGEM',descricao:'CAMARA DE DRENAGEM TORACICA MSB AMAZON 2000ML VEDAÇAO A SECO',status:'Slow Moving',observacao:'',paExcelValor:78930.07,mps:[{code:'MP0000401',descricao:'DRENO PARA SUCCAO TORACICA',valorExcel:84855.88}]},
+  {paCode:'51399',familia:'FIO GUIA TEFLONADO',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000435',descricao:'GUIA DE TROCA P/ ANGIOPLASTIA 0.035"X260CM J TIP 3MM PTFE',valorExcel:6970.99}]},
+  {paCode:'51205',familia:'FIO GUIA TEFLONADO',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000221',descricao:'GUIA DE TROCA P/ ANGIOPLAST 0.032"X200CM J TIP 3MM TFE',valorExcel:5032.85}]},
+  {paCode:'73199',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000456',descricao:'CAT BALAO P/ANG TRAN PER BALAO 7MMX150MM COMP 135CM C/FG 0.0',valorExcel:54200.79}]},
+  {paCode:'73187',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000553',descricao:'CAT BALAO P/ANG PER BALAO 5MMX100MM COMP135CM C/FG 0.035',valorExcel:6737.22}]},
+  {paCode:'73349',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000428',descricao:'CAT BALAO P/ANG TRAN PER BALAO3,0X150MM COMP150CM C/ FG0,018',valorExcel:9330.42}]},
+  {paCode:'52074',familia:'KIT DUPLO J',descricao:'KIT S.URET MSB DJ 4.7FRX26CM FG HID RT 0.032"X150CM STD',status:'Slow Moving',observacao:'',paExcelValor:1280.08,mps:[]},
+  {paCode:'73344',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000454',descricao:'CAT BALAO P/ANG TRAN PER BALAO 5MMX120MM COMP 150CM C/FG 0.0',valorExcel:6591.98}]},
+  {paCode:'73173',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 9MMX60MM COMP 135CM C/ FG 0,035',status:'Slow Moving',observacao:'',paExcelValor:9451.75,mps:[{code:'MP0000410',descricao:'CAT BALAO P/ANG TRAN PER BALAO 9MMX60MM COMP135CM C/ FG0,035',valorExcel:5682.02}]},
+  {paCode:'73352',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000458',descricao:'CAT BALAO P/ANG TRAN PER BALAO 5MMX150MM COMP 150CM C/FG 0.0',valorExcel:13550.17}]},
+  {paCode:'73363',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 2MMX200MM COMP150CM C/FG 0.018',status:'Slow Moving',observacao:'',paExcelValor:6665.05,mps:[{code:'MP0000463',descricao:'CAT BALAO P/ANG TRAN PER BALAO 2MMX200MM COMP 150CM C/FG 0.0',valorExcel:5493.32}]},
+  {paCode:'73192',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000404',descricao:'CAT BALAO P/ANG TRAN PER BALAO5MMX120MM COMP135CM C/ FG0,035',valorExcel:22627.67}]},
+  {paCode:'71002',familia:'',descricao:'CATETER ELETROCOAGULADOR REALCLOSURE MSB CESTA 12X33mm',status:'Slow Moving',observacao:'',paExcelValor:2857.79,mps:[]},
+  {paCode:'52092',familia:'SONDA URETERAL DUPLO J',descricao:'SONDA URETERAL MSB DUPLO J 6.0FR REG22-32CM',status:'Slow Moving',observacao:'',paExcelValor:8005.04,mps:[]},
+  {paCode:'73350',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000429',descricao:'CAT BALAO P/ANG TRAN PER BALAO3,5X150MM COMP150CM C/ FG0,018',valorExcel:25397.93}]},
+  {paCode:'57502',familia:'INTRODUTOR FEMORAL',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000323',descricao:'AGULHA DE PUNCAO 18GAX7CM COM HUB BRANCO',valorExcel:2742.2}]},
+  {paCode:'73163',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000475',descricao:'CAT BALAO P/ANG TRAN PER BALAO 8MMX40MM COMP 135CM C/FG 0.03',valorExcel:5087.2}]},
+  {paCode:'73368',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 5MMX200MM COMP150CM C/FG 0.018',status:'Slow Moving',observacao:'',paExcelValor:9299.94,mps:[{code:'MP0000468',descricao:'CAT BALAO P/ANG TRAN PER BALAO 5MMX200MM COMP 150CM C/FG 0.0',valorExcel:7324.41}]},
+  {paCode:'73178',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000552',descricao:'CAT BALAO P/ANG PER BALAO 5MMX80MM COMP135CM C/FG 0.035',valorExcel:6737.22}]},
+  {paCode:'73175',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 12MMX60MM COMP135CM C/FG 0.035',status:'Slow Moving',observacao:'',paExcelValor:7652.9,mps:[{code:'MP0000484',descricao:'CAT BALAO P/ANG TRAN PER BALAO 12MMX60MM COMP 135CM C/FG 0.0',valorExcel:26590.49}]},
+  {paCode:'73325',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000547',descricao:'CAT BALAO P/ANG PER BALAO 3MMX80MM COMP150CM C/FG 0.018',valorExcel:6737.22}]},
+  {paCode:'51381',familia:'FIO GUIA HIDROFILICO',descricao:'FIO GUIA T MSB 0.035"X150CM ANGULADO HIDROFILICO RIGIDO',status:'Slow Moving',observacao:'',paExcelValor:78450.813715,mps:[]},
+  {paCode:'52038',familia:'KIT DUPLO J',descricao:'KIT S.URET MSB DJ-F 4.7FRX26CM FG TFE RT 0.035"X150CM',status:'Retornar para o estoque',observacao:'',paExcelValor:143.81,mps:[]},
+  {paCode:'73208',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000461',descricao:'CAT BALAO P/ANG TRAN PER BALAO 6MMX200MM COMP 135CM C/FG 0.0',valorExcel:58229.26}]},
+  {paCode:'73348',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000427',descricao:'CAT BALAO P/ANG TRAN PER BALAO2,5X150MM COMP150CM C/ FG0,018',valorExcel:19536.87}]},
+  {paCode:'73333',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000548',descricao:'CAT BALAO P/ANG PER BALAO 3MMX100MM COMP150CM C/FG 0.018',valorExcel:6737.22}]},
+  {paCode:'73207',familia:'CATETER BALAO PTA',descricao:'CAT BALAO P/ANG PER 5MMX200MM COMP135CM C/FG 0.035',status:'Slow Moving',observacao:'',paExcelValor:37240.23,mps:[{code:'MP0000460',descricao:'CAT BALAO P/ANG TRAN PER BALAO 5MMX200MM COMP 135CM C/FG 0.0',valorExcel:23436.08}]},
+  {paCode:'73347',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000426',descricao:'CAT BALAO P/ANG TRAN PER BALAO2,0X150MM COMP150CM C/ FG0,018',valorExcel:5303.39}]},
+  {paCode:'73165',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000470',descricao:'CAT BALAO P/ANG TRAN PER BALAO 10MMX40MM COMP 135CM C/FG 0.0',valorExcel:10174.4}]},
+  {paCode:'73171',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000408',descricao:'CAT BALAO P/ANG TRAN PER BALAO 7MMX60MM COMP135CM C/ FG0,035',valorExcel:8789.3}]},
+  {paCode:'52109',familia:'KIT DUPLO J',descricao:'KIT S.URET MSB DJ-F 6.0FRX26CM FG HID RT 0.035"X150CM STD',status:'Slow Moving',observacao:'',paExcelValor:3739.46,mps:[]},
+  {paCode:'51036',familia:'',descricao:'FIO GUIA MSB HYDRO 0.035"X150CM RETO HIDROFILICO RIGIDO',status:'Retornar para o estoque',observacao:'',paExcelValor:37.96,mps:[]},
+  {paCode:'73323',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000544',descricao:'CAT BALAO P/ANG PER BALAO 2MMX80MM COMP150CM C/FG 0.018',valorExcel:6737.22}]},
+  {paCode:'57304',familia:'INTRODUTOR FEMORAL',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000234',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 18FRX30CM D35CM',valorExcel:31728.76}]},
+  {paCode:'73179',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'Nunca produzido',paExcelValor:0,mps:[{code:'MP0000554',descricao:'CAT BALAO P/ANG PER BALAO 6MMX80MM COMP135CM C/FG 0.035',valorExcel:6737.22}]},
+  {paCode:'58411',familia:'BAINHA SPEED CROSS TWIST',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000291',descricao:'INTRODUTOR P/ CATETER C/ VALVULA 7.0FRX90CM D108CM DESTINO T',valorExcel:96196.56}]},
+  {paCode:'73365',familia:'CATETER BALAO PTA',descricao:'',status:'Slow Moving',observacao:'',paExcelValor:0,mps:[{code:'MP0000465',descricao:'CAT BALAO P/ANG TRAN PER BALAO 3MMX200MM COMP 150CM C/FG 0.0',valorExcel:11505.93}]},
+];
+
+let slowMovingCurated = []; // carregado do Supabase (ou seedado 1x a partir de SLOW_MOVING_SEED)
+
+async function loadSlowMoving() {
+  const { data, error } = await selectAll('slow_moving_analysis', 'pa_code,familia,descricao,status,observacao,pa_valor_ref,mp_codes');
+  if (error) { console.warn('slow_moving_analysis indisponível:', error.message); return []; }
+  return data.map(r => ({
+    paCode: r.pa_code, familia: r.familia, descricao: r.descricao, status: r.status,
+    observacao: r.observacao, paExcelValor: r.pa_valor_ref, mps: r.mp_codes || [],
+  }));
 }
-function paLastSaleMonth(p) {
-  const sh = p.salesHistory || {};
-  const keys = Object.keys(sh).filter(k => (sh[k] || 0) > 0).sort();
-  return keys.length ? keys[keys.length - 1] : null;
+async function seedSlowMovingIfEmpty() {
+  if (slowMovingCurated.length || !isLoggedIn()) return;
+  const rows = SLOW_MOVING_SEED.map(g => ({
+    pa_code: g.paCode, familia: g.familia, descricao: g.descricao, status: g.status,
+    observacao: g.observacao, pa_valor_ref: g.paExcelValor, mp_codes: g.mps,
+  }));
+  const { error } = await sb.from('slow_moving_analysis').insert(rows);
+  if (error) { console.warn('Não deu para semear slow_moving_analysis:', error.message); return; }
+  slowMovingCurated = SLOW_MOVING_SEED;
 }
-function slowMovingRows() {
-  return state.getAll()
-    .map(p => ({ p, giro: paAnnualTurnover(p) }))
-    .filter(x => x.giro != null && x.giro < SLOW_GIRO_LIMIT)
-    .sort((a, b) => a.giro - b.giro);
+
+/* Junta a classificação curada com o estoque AO VIVO (PA + materiais) —
+   é o que faz a tela sempre refletir a última importação de estoque. */
+function slowMovingCuratedRows() {
+  const productsByCode = new Map(state.getAll().map(p => [p.code.toUpperCase(), p]));
+  const memsByCode     = new Map(memsItems.map(i => [i.code.toUpperCase(), i]));
+  return slowMovingCurated.map(g => {
+    const isOrphan = g.paCode.startsWith('SEM_PA::');
+    const pa = isOrphan ? null : productsByCode.get(g.paCode.toUpperCase());
+    const mps = g.mps.map(m => {
+      const live = memsByCode.get(String(m.code).toUpperCase());
+      return { ...m, stockLive: live ? (live.stock || 0) : null };
+    });
+    const stockMP    = mps.reduce((s, m) => s + (m.stockLive || 0), 0);
+    const valorTotal = (g.paExcelValor || 0) + g.mps.reduce((s, m) => s + (m.valorExcel || 0), 0);
+    return {
+      paCode:     isOrphan ? null : g.paCode,
+      familia:    pa?.family || g.familia || '—',
+      descricao:  pa?.description || g.descricao || (isOrphan ? 'Materiais sem PA vinculado' : g.paCode),
+      status:     g.status,
+      observacao: g.observacao,
+      stockPA:    pa ? (pa.stock || 0) : null,
+      stockMP,
+      mps,
+      valorTotal,
+    };
+  }).sort((a, b) => b.valorTotal - a.valorTotal);
 }
 
 /* ── Render da aba ── */
+const SLOW_STATUS_BADGE = {
+  'Slow Moving':             { cls: 'b-warn', label: 'Slow Moving' },
+  'Analisar':                { cls: 'b-crit', label: 'Analisar' },
+  'Retornar para o estoque': { cls: 'b-ok',   label: 'Retornar p/ estoque' },
+};
+
 function renderAlertas() {
   if (!alertasEl) return;
   const lots     = lotsInWindow();
-  const slowAll  = slowMovingRows();
+  const slowAll  = slowMovingCuratedRows();
   const products = new Map(state.getAll().map(p => [p.code.toUpperCase(), p]));
   const families = [...new Set(state.getAll().map(p => p.family).filter(Boolean))].sort();
+  const slowFamilies = [...new Set(slowAll.map(r => r.familia).filter(f => f && f !== '—'))].sort();
 
   const criticos   = lots.filter(l => l.days < LOT_CRIT_DAYS.critico);
   const critUnits  = criticos.reduce((s, l) => s + (l.qty || 0), 0);
   const lotsUnits  = lots.reduce((s, l) => s + (l.qty || 0), 0);
-  const slowUnits  = slowAll.reduce((s, x) => s + (x.p.stock || 0), 0);
+  const slowUnitsPA = slowAll.reduce((s, r) => s + (r.stockPA || 0), 0);
+  const slowUnitsMP = slowAll.reduce((s, r) => s + (r.stockMP || 0), 0);
+  const slowValor   = slowAll.reduce((s, r) => s + (r.valorTotal || 0), 0);
   const lastUpdate = paLots.length ? paLots.reduce((m, l) => l.updatedAt > m ? l.updatedAt : m, '') : null;
 
   const isVal = alertasTab === 'validade';
@@ -3674,9 +3797,10 @@ function renderAlertas() {
       return true;
     }), products);
 
-  const slowRows = slowAll.filter(({ p }) => {
-    if (alertasFilters.family && (p.family || '') !== alertasFilters.family) return false;
-    if (q) return p.code.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q);
+  const slowRows = slowAll.filter(r => {
+    if (alertasFilters.family && r.familia !== alertasFilters.family) return false;
+    if (q) return (r.paCode || '').toLowerCase().includes(q) || r.descricao.toLowerCase().includes(q)
+               || r.mps.some(m => m.code.toLowerCase().includes(q) || m.descricao.toLowerCase().includes(q));
     return true;
   });
 
@@ -3685,7 +3809,7 @@ function renderAlertas() {
       <div class="dashboard-header">
         <div>
           <h1 class="page-title">Alertas de Estoque</h1>
-          <p class="last-update">Validade de lotes e giro baixo — produto acabado</p>
+          <p class="last-update">Validade de lotes e slow moving — produto acabado e materiais</p>
           ${lastUpdate ? `<p class="last-update">lotes atualizados em ${new Date(lastUpdate).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })}</p>` : ''}
           ${!paLots.length ? `<p class="last-update">Importe os lotes com validade na aba <strong>Atualizar estoque (PCP)</strong> → Importar validade (lotes)</p>` : ''}
         </div>
@@ -3708,12 +3832,17 @@ function renderAlertas() {
         <div class="kpi" style="${slowAll.length ? 'border-color:var(--warn-text)' : ''}">
           <div class="kpi-label">🐌 Itens slow moving</div>
           <div class="kpi-value ${slowAll.length ? 'text-warn' : ''}">${slowAll.length}</div>
-          <div class="kpi-sub">giro abaixo de ${SLOW_GIRO_LIMIT}x/ano</div>
+          <div class="kpi-sub">análise PCP/comercial</div>
         </div>
         <div class="kpi">
           <div class="kpi-label">📦 Unidades paradas</div>
-          <div class="kpi-value">${fmt.int(slowUnits)}</div>
-          <div class="kpi-sub">estoque em itens slow moving</div>
+          <div class="kpi-value">${fmt.int(slowUnitsPA)} <span style="font-size:13px;color:var(--muted)">PA</span> · ${fmt.int(slowUnitsMP)} <span style="font-size:13px;color:var(--muted)">MP</span></div>
+          <div class="kpi-sub">estoque ao vivo nos itens slow moving</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">💰 Valor na análise</div>
+          <div class="kpi-value">${fmt.brl(slowValor)}</div>
+          <div class="kpi-sub">valor de estoque na data do relatório</div>
         </div>
       </div>
 
@@ -3729,7 +3858,7 @@ function renderAlertas() {
         </div>
         <select class="filter-select" id="alertas-family">
           <option value="">Todas as famílias</option>
-          ${families.map(f => `<option value="${f}" ${alertasFilters.family === f ? 'selected' : ''}>${f}</option>`).join('')}
+          ${(isVal ? families : slowFamilies).map(f => `<option value="${f}" ${alertasFilters.family === f ? 'selected' : ''}>${f}</option>`).join('')}
         </select>
         ${isVal ? `
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
@@ -3788,36 +3917,37 @@ function renderAlertas() {
       <div class="tbl-wrap">
         <table>
           <thead><tr>
-            <th>Produto</th>
+            <th>Produto (PA)</th>
             <th>Família</th>
-            <th class="num-c">Estoque</th>
-            <th class="num-c">Giro (12m)</th>
-            <th class="num-c">Cobertura</th>
-            <th class="num-c">Última saída</th>
-            <th class="num-c">Situação</th>
+            <th class="num-c">Estoque PA</th>
+            <th class="num-c">Estoque MP</th>
+            <th class="num-c">Valor na análise</th>
+            <th class="num-c">Status</th>
+            <th>Observação</th>
           </tr></thead>
           <tbody>
             ${!slowRows.length ? `<tr><td colspan="7" class="empty">Nenhum item slow moving com os filtros aplicados.</td></tr>` :
-              slowRows.map(({ p, giro }) => {
-                const semGiro = giro < 1;
-                const lastMk = paLastSaleMonth(p);
+              slowRows.map(r => {
+                const badge = SLOW_STATUS_BADGE[r.status] || SLOW_STATUS_BADGE['Slow Moving'];
+                const mpList = r.mps.map(m => `${m.code} (${m.stockLive != null ? fmt.int(m.stockLive) : '—'})`).join(', ');
                 return `<tr>
                   <td>
-                    <div style="font-weight:500">${p.description}</div>
-                    <div style="font-size:12px;color:var(--hint)">${p.code}</div>
+                    <div style="font-weight:500">${r.descricao}</div>
+                    <div style="font-size:12px;color:var(--hint)">${r.paCode || 'Sem PA vinculado'}</div>
+                    ${mpList ? `<div style="font-size:11px;color:var(--muted);margin-top:2px">MP: ${mpList}</div>` : ''}
                   </td>
-                  <td style="font-size:12px;color:var(--muted)">${p.family || '—'}</td>
-                  <td class="num-c" style="font-weight:500">${fmt.int(p.stock || 0)}</td>
-                  <td class="num-c" style="font-weight:600;color:${semGiro ? 'var(--danger-text)' : 'var(--warn-text)'}">${giro.toFixed(1).replace('.', ',')}x</td>
-                  <td class="num-c" style="font-size:12px">${fmt.cov(coverage(p))}</td>
-                  <td class="num-c" style="font-size:12px;color:var(--muted)">${lastMk ? fmtMonthKey(lastMk) : '—'}</td>
-                  <td class="num-c"><span class="badge ${semGiro ? 'b-crit' : 'b-warn'}">${semGiro ? 'Sem giro' : 'Giro baixo'}</span></td>
+                  <td style="font-size:12px;color:var(--muted)">${r.familia}</td>
+                  <td class="num-c" style="font-weight:500">${r.stockPA != null ? fmt.int(r.stockPA) : '—'}</td>
+                  <td class="num-c" style="font-weight:500">${r.mps.length ? fmt.int(r.stockMP) : '—'}</td>
+                  <td class="num-c" style="font-size:12px;color:var(--muted)">${fmt.brl(r.valorTotal)}</td>
+                  <td class="num-c"><span class="badge ${badge.cls}">${badge.label}</span></td>
+                  <td style="font-size:12px;color:var(--muted)">${r.observacao || '—'}</td>
                 </tr>`;
               }).join('')}
           </tbody>
         </table>
       </div>
-      <p class="last-update" style="margin-top:8px">Regra: giro anualizado (vendas 6m × 2 ÷ estoque) abaixo de ${SLOW_GIRO_LIMIT}x/ano · "sem giro" quando abaixo de 1x · ordenado por menor giro</p>
+      <p class="last-update" style="margin-top:8px">Análise curada (PCP/comercial) a partir do relatório de estratificação de estoque · quantidades PA e MP sempre ao vivo · ordenado por valor de estoque na análise</p>
       `}
     </div>
   `;
@@ -3918,32 +4048,33 @@ async function exportSlowMovingXLSX(rows) {
   wb.created = new Date();
   const ws = wb.addWorksheet('Slow moving', { views: [{ state: 'frozen', ySplit: 1 }] });
   ws.columns = [
-    { header: 'Código',           key: 'code',   width: 14 },
-    { header: 'Descrição',        key: 'desc',   width: 46 },
-    { header: 'Família',          key: 'family', width: 26 },
-    { header: 'Estoque',          key: 'stock',  width: 11 },
-    { header: 'Giro anualizado',  key: 'giro',   width: 15 },
-    { header: 'Cobertura (m)',    key: 'cov',    width: 14 },
-    { header: 'Última saída',     key: 'last',   width: 13 },
-    { header: 'Situação',         key: 'sit',    width: 13 },
+    { header: 'Código PA',          key: 'code',    width: 16 },
+    { header: 'Descrição',          key: 'desc',    width: 46 },
+    { header: 'Família',            key: 'family',  width: 26 },
+    { header: 'Estoque PA',         key: 'stockPA', width: 12 },
+    { header: 'Estoque MP',         key: 'stockMP', width: 12 },
+    { header: 'Materiais (MP)',     key: 'mps',     width: 40 },
+    { header: 'Valor na análise',   key: 'valor',   width: 16 },
+    { header: 'Status',             key: 'status',  width: 20 },
+    { header: 'Observação',         key: 'obs',     width: 30 },
   ];
   styleHeaderRow(ws.getRow(1));
-  rows.forEach(({ p, giro }) => {
-    const lastMk = paLastSaleMonth(p);
-    const cov = coverage(p);
-    const semGiro = giro < 1;
+  rows.forEach(r => {
+    const badge = SLOW_STATUS_BADGE[r.status] || SLOW_STATUS_BADGE['Slow Moving'];
     const row = ws.addRow({
-      code: p.code, desc: p.description, family: p.family || '', stock: p.stock || 0,
-      giro: Number(giro.toFixed(2)), cov: Number.isFinite(cov) ? Number(cov.toFixed(1)) : null,
-      last: lastMk ? fmtMonthKey(lastMk) : '', sit: semGiro ? 'Sem giro' : 'Giro baixo',
+      code: r.paCode || 'Sem PA vinculado', desc: r.descricao, family: r.familia,
+      stockPA: r.stockPA != null ? r.stockPA : null,
+      stockMP: r.mps.length ? r.stockMP : null,
+      mps: r.mps.map(m => `${m.code} (${m.stockLive != null ? m.stockLive : '—'})`).join(', '),
+      valor: Number(r.valorTotal.toFixed(2)), status: badge.label, obs: r.observacao,
     });
-    row.getCell('stock').numFmt = '#,##0';
-    row.getCell('giro').numFmt = '0.00"x"';
-    row.getCell('cov').numFmt = '0.0';
-    const fill = semGiro ? XLSX_CRIT_FILL.vencido : XLSX_CRIT_FILL.atencao;
+    row.getCell('stockPA').numFmt = '#,##0';
+    row.getCell('stockMP').numFmt = '#,##0';
+    row.getCell('valor').numFmt = '"R$" #,##0';
+    const fill = r.status === 'Analisar' ? XLSX_CRIT_FILL.vencido : XLSX_CRIT_FILL.atencao;
     row.eachCell(c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } }; });
   });
-  ws.autoFilter = { from: 'A1', to: 'H1' };
+  ws.autoFilter = { from: 'A1', to: 'I1' };
   await downloadWorkbook(wb, `slow_moving_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
@@ -4065,7 +4196,7 @@ async function boot() {
     currentSession = sessionData?.session ?? null;
     await loadCurrentProfile();
 
-    const [products, materials, meta, bom, bomStock, lots, lotStock] = await Promise.all([
+    const [products, materials, meta, bom, bomStock, lots, lotStock, slowMoving] = await Promise.all([
       storage.load(),
       loadMemsItems(),
       loadMemsMeta(),
@@ -4073,6 +4204,7 @@ async function boot() {
       loadMemsBomStock(),
       loadPaLots(),
       loadPaLotStock(),
+      loadSlowMoving(),
     ]);
     state._setAll(products);
     memsItems    = materials;
@@ -4081,6 +4213,8 @@ async function boot() {
     memsBomStock = bomStock;
     paLots       = lots;
     paLotStock   = lotStock;
+    slowMovingCurated = slowMoving;
+    await seedSlowMovingIfEmpty();
   } catch (err) {
     showToast('Erro ao carregar dados: ' + err.message, 'err');
   } finally {
