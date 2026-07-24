@@ -512,6 +512,15 @@ const COL_SALES = {
   receipt: 'Recebimento',
   qty:     'Quantidade',
 };
+// Arquivo separado (origem diferente do Dynamics de estoque normal): itens
+// reprovados/parados aguardando retrabalho. "Quantidade física disponível"
+// vem sempre 0 nesse relatório (é estoque bloqueado) — a quantidade real é
+// "Estoque físico".
+const COL_RETRABALHO = {
+  code: 'Número do item',
+  name: 'Nome do produto',
+  qty:  'Estoque físico',
+};
 
 /* ═══════════════════════════════════════════════
    MONTH UTILITIES
@@ -778,13 +787,15 @@ function migrateProduct(raw) {
 function paRowToProduct(row) {
   return migrateProduct({
     code: row.code, description: row.description, family: row.family,
-    stock: row.stock, stockSA: row.stock_sa, salesHistory: row.sales_history || {},
+    stock: row.stock, stockSA: row.stock_sa, stockRetrabalho: row.stock_retrabalho || 0,
+    salesHistory: row.sales_history || {},
   });
 }
 function paProductToRow(p) {
   return {
     code: p.code, description: p.description, family: p.family,
-    stock: p.stock, stock_sa: p.stockSA, sales_history: p.salesHistory || {},
+    stock: p.stock, stock_sa: p.stockSA, stock_retrabalho: p.stockRetrabalho || 0,
+    sales_history: p.salesHistory || {},
     updated_at: new Date().toISOString(),
   };
 }
@@ -795,7 +806,7 @@ const storage = {
     if (error) { showToast('Erro ao carregar produtos: ' + error.message, 'err'); return []; }
     if (!data.length) {
       // Base ainda vazia: semeia com o catálogo padrão (só grava se já tiver login, por causa da RLS)
-      const seeded = SEED.map(seed => ({ code: seed.code, description: seed.description, family: FAMILY_MAP[seed.code] || '', stock: 0, stockSA: 0, salesHistory: {} }));
+      const seeded = SEED.map(seed => ({ code: seed.code, description: seed.description, family: FAMILY_MAP[seed.code] || '', stock: 0, stockSA: 0, stockRetrabalho: 0, salesHistory: {} }));
       if (isLoggedIn()) await storage.save(seeded);
       return seeded;
     }
@@ -829,9 +840,10 @@ const state = (() => {
       code:         String(data.code).toUpperCase().trim(),
       description:  String(data.description || '').trim(),
       family:       String(data.family || '').trim(),
-      stock:        Math.max(0, Math.round(Number(data.stock) || 0)),
-      stockSA:      Math.max(0, Math.round(Number(data.stockSA) || 0)),
-      salesHistory: data.salesHistory || {},
+      stock:           Math.max(0, Math.round(Number(data.stock) || 0)),
+      stockSA:         Math.max(0, Math.round(Number(data.stockSA) || 0)),
+      stockRetrabalho: Math.max(0, Math.round(Number(data.stockRetrabalho) || 0)),
+      salesHistory:    data.salesHistory || {},
     };
   }
 
@@ -856,6 +868,24 @@ const state = (() => {
         const code = String(item.code).toUpperCase().trim();
         const existing = products.find(p => p.code === code);
         if (existing) existing.stock = Math.max(0, Math.round(item.stock));
+      }
+      // Reaplica o retrabalho pendente por cima do snapshot do Dynamics — o
+      // arquivo diário não sabe do retrabalho, então ele tem que ser somado
+      // de novo a cada importação (a fonte de verdade é o campo stockRetrabalho).
+      if (items.length > 0) products.forEach(p => { p.stock += (p.stockRetrabalho || 0); });
+      notify();
+      await storage.save(products);
+    },
+
+    // Arquivo separado de retrabalho (origem diferente): soma direto ao
+    // "stock" do PA. Snapshot — zera o retrabalho de todo mundo primeiro
+    // (tirando do stock atual) antes de aplicar os valores novos.
+    async applyRetrabalhoImport(items) {
+      products.forEach(p => { p.stock -= (p.stockRetrabalho || 0); p.stockRetrabalho = 0; });
+      for (const item of items) {
+        const code = String(item.code).toUpperCase().trim();
+        const existing = products.find(p => p.code === code);
+        if (existing) { existing.stockRetrabalho = Math.max(0, Math.round(item.qty)); existing.stock += existing.stockRetrabalho; }
       }
       notify();
       await storage.save(products);
@@ -1351,6 +1381,7 @@ let editingCode = null;
 // Pending import state (not persisted)
 let pendingStock = null; // { items, filename, skipped }
 let pendingSales = null; // { salesMap, months, filename, skipped }
+let pendingRetrabalho = null; // { paItems, mpItems, ignored, filename, skipped }
 
 function renderEditor() {
   if (!isLoggedIn()) {
@@ -1454,6 +1485,34 @@ function renderEditor() {
             </div>
           </div>
         </div>
+
+        <!-- Retrabalho import (arquivo separado, origem diferente do Dynamics) -->
+        <div class="import-card">
+          <p class="import-card-title"><i class="ti ti-tool" aria-hidden="true"></i> Importar retrabalho pendente</p>
+          <p class="import-card-sub">Estoque reprovado aguardando retrabalho (PA ou material) · soma ao estoque do código · cada importação substitui o retrabalho anterior</p>
+          <div class="drop-zone" id="dz-retrabalho">
+            <input type="file" id="fi-retrabalho" accept=".xlsx,.xls,.csv" aria-label="Selecionar arquivo de retrabalho">
+            <div class="drop-zone-icon"><i class="ti ti-file-spreadsheet" aria-hidden="true"></i></div>
+            <p class="drop-zone-text">Arraste o arquivo ou clique para selecionar</p>
+            <p class="drop-zone-hint">.xlsx · .xls · .csv</p>
+          </div>
+          <div class="import-preview" id="prev-retrabalho">
+            <p class="import-info" id="prev-retrabalho-info"></p>
+            <div class="preview-tbl-wrap">
+              <table class="preview-tbl">
+                <thead><tr><th>Código</th><th>Descrição</th><th style="text-align:right">Qtd</th><th>Tipo</th></tr></thead>
+                <tbody id="prev-retrabalho-body"></tbody>
+              </table>
+            </div>
+            <div class="preview-actions">
+              <span class="preview-count" id="prev-retrabalho-count"></span>
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-sm btn-ghost" id="btn-retrabalho-cancel">Cancelar</button>
+                <button class="btn btn-sm btn-primary" id="btn-retrabalho-apply"><i class="ti ti-check" aria-hidden="true"></i> Aplicar</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="divider"></div>
@@ -1534,6 +1593,12 @@ function bindEditorEvents() {
   document.getElementById('btn-lots-cancel')?.addEventListener('click', cancelLotsImport);
   document.getElementById('btn-lots-apply')?.addEventListener('click', applyLotsImport);
   setupDragDrop('dz-lots', 'fi-lots');
+
+  // Retrabalho import
+  document.getElementById('fi-retrabalho')?.addEventListener('change', e => handleRetrabalhoFile(e.target.files[0]));
+  document.getElementById('btn-retrabalho-cancel')?.addEventListener('click', cancelRetrabalhoImport);
+  document.getElementById('btn-retrabalho-apply')?.addEventListener('click', applyRetrabalhoImport);
+  setupDragDrop('dz-retrabalho', 'fi-retrabalho');
 }
 
 function setupDragDrop(dzId, fiId) {
@@ -1546,9 +1611,10 @@ function setupDragDrop(dzId, fiId) {
     e.preventDefault(); dz.classList.remove('drag-over');
     const file = e.dataTransfer?.files[0];
     if (!file) return;
-    if (fiId === 'fi-stock')      handleStockFile(file);
-    else if (fiId === 'fi-lots')  handleLotsFile(file);
-    else                          handleSalesFile(file);
+    if (fiId === 'fi-stock')           handleStockFile(file);
+    else if (fiId === 'fi-lots')       handleLotsFile(file);
+    else if (fiId === 'fi-retrabalho') handleRetrabalhoFile(file);
+    else                               handleSalesFile(file);
   });
 }
 
@@ -1668,6 +1734,106 @@ async function applyStockImport() {
   }
 }
 
+/* ── Retrabalho import handlers (arquivo separado — origem diferente do
+   Dynamics de estoque normal). Soma ao estoque do código correspondente
+   (PA ou material); snapshot — cada importação substitui o retrabalho
+   anterior. ── */
+function aggregateRetrabalho(rows) {
+  const map = {};
+  let skipped = 0;
+  for (const row of rows) {
+    const code = String(row[COL_RETRABALHO.code] || '').trim();
+    if (!code) { skipped++; continue; }
+    const name = String(row[COL_RETRABALHO.name] || '').trim();
+    const qty  = toNum(row[COL_RETRABALHO.qty]);
+    if (!map[code]) map[code] = { code, description: name, qty: 0 };
+    map[code].qty += qty;
+    if (name && !map[code].description) map[code].description = name;
+  }
+  return { items: Object.values(map), skipped };
+}
+
+async function handleRetrabalhoFile(file) {
+  if (!file) return;
+  showLoading('Lendo arquivo de retrabalho…');
+  try {
+    const rows = await readExcelFile(file);
+    const { items, skipped } = aggregateRetrabalho(rows);
+    if (!items.length) { showToast('Nenhum item encontrado. Verifique as colunas do arquivo.', 'err'); return; }
+    const paCodeSet   = new Set(state.getAll().map(p => p.code.toUpperCase()));
+    const memsCodeSet = new Set(memsItems.map(i => i.code.toUpperCase()));
+    const paItems = [], mpItems = [], ignored = [];
+    for (const item of items) {
+      const code = String(item.code).toUpperCase().trim();
+      if (paCodeSet.has(code)) paItems.push({ ...item, code });
+      else if (memsCodeSet.has(code)) mpItems.push({ ...item, code });
+      else ignored.push({ ...item, code });
+    }
+    pendingRetrabalho = { paItems, mpItems, ignored, filename: file.name, skipped, totalRows: rows.length };
+    renderRetrabalhoPreview();
+  } catch(err) {
+    showToast('Erro ao ler o arquivo: ' + err.message, 'err');
+  } finally {
+    hideLoading();
+  }
+}
+
+function renderRetrabalhoPreview() {
+  if (!pendingRetrabalho) return;
+  const { paItems, mpItems, ignored, filename, skipped, totalRows } = pendingRetrabalho;
+  const prev  = document.getElementById('prev-retrabalho');
+  const info  = document.getElementById('prev-retrabalho-info');
+  const body  = document.getElementById('prev-retrabalho-body');
+  const count = document.getElementById('prev-retrabalho-count');
+  prev.classList.add('visible');
+  info.innerHTML = `<i class="ti ti-file" aria-hidden="true"></i> <strong>${filename}</strong> · ${totalRows} linhas · ${skipped + ignored.length} ignoradas`;
+  body.innerHTML = [
+    ...paItems.map(item => `<tr>
+      <td><strong>${item.code}</strong></td>
+      <td>${item.description || '—'}</td>
+      <td style="text-align:right">${fmt.int(item.qty)}</td>
+      <td><span class="badge b-upd">PA</span></td>
+    </tr>`),
+    ...mpItems.map(item => `<tr>
+      <td><strong>${item.code}</strong></td>
+      <td>${item.description || '—'}</td>
+      <td style="text-align:right">${fmt.int(item.qty)}</td>
+      <td><span class="badge" style="background:var(--accent-bg);color:var(--accent)">Material</span></td>
+    </tr>`),
+  ].join('');
+  count.textContent = `${paItems.length} PA · ${mpItems.length} materiais · ${skipped + ignored.length} ignorados`;
+}
+
+function cancelRetrabalhoImport() {
+  pendingRetrabalho = null;
+  const prev = document.getElementById('prev-retrabalho');
+  if (prev) prev.classList.remove('visible');
+  const fi = document.getElementById('fi-retrabalho');
+  if (fi) fi.value = '';
+}
+
+async function applyRetrabalhoImport() {
+  if (!pendingRetrabalho) return;
+  if (!isLoggedIn()) { showToast('Faça login antes de importar o retrabalho.', 'err'); return; }
+  showLoading('Salvando retrabalho…');
+  try {
+    const { paItems, mpItems } = pendingRetrabalho;
+    await state.applyRetrabalhoImport(paItems);
+    memsItems.forEach(i => { i.stock -= (i.stockRetrabalho || 0); i.stockRetrabalho = 0; });
+    mpItems.forEach(item => {
+      const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
+      if (existing) { existing.stockRetrabalho = Math.max(0, Math.round(item.qty)); existing.stock += existing.stockRetrabalho; }
+    });
+    await saveMemsItems();
+    showToast(`Retrabalho atualizado: ${paItems.length} PA · ${mpItems.length} materiais`);
+    cancelRetrabalhoImport();
+  } catch(err) {
+    showToast('Erro ao salvar retrabalho: ' + err.message, 'err');
+  } finally {
+    hideLoading();
+  }
+}
+
 /* ── Sales import handlers ── */
 async function handleSalesFile(file) {
   if (!file) return;
@@ -1763,7 +1929,11 @@ function onSaveManual() {
 
   const family = document.getElementById('f-family')?.value || '';
   const existing = state.getByCode(code);
-  state.addOrUpdate({ code, description: desc, family, stock: existing?.stock ?? 0, salesHistory: existing?.salesHistory ?? {} });
+  state.addOrUpdate({
+    code, description: desc, family, stock: existing?.stock ?? 0,
+    stockSA: existing?.stockSA ?? 0, stockRetrabalho: existing?.stockRetrabalho ?? 0,
+    salesHistory: existing?.salesHistory ?? {},
+  });
   closeProductModal();
   showToast(`Produto ${code.toUpperCase()} salvo.`);
 }
@@ -2077,7 +2247,8 @@ function materialRowToItem(row) {
   return {
     code: row.code, desc: row.description, type: row.type, family: row.family,
     supplier: row.supplier, origin: row.origin, leadTime: row.lead_time,
-    stock: row.stock, avgForecast: row.avg_forecast, avgConsumption: row.avg_consumption,
+    stock: row.stock, stockRetrabalho: row.stock_retrabalho || 0,
+    avgForecast: row.avg_forecast, avgConsumption: row.avg_consumption,
     inTransit: row.in_transit, consumoHistory: row.consumo_history || {},
     forecastHistory: row.forecast_history || {}, transitEntries: row.transit_entries || [],
   };
@@ -2086,7 +2257,8 @@ function materialItemToRow(item) {
   return {
     code: item.code, description: item.desc || '', type: item.type || '', family: item.family || '',
     supplier: item.supplier || '', origin: item.origin || '', lead_time: item.leadTime ?? null,
-    stock: item.stock || 0, avg_forecast: item.avgForecast || 0, avg_consumption: item.avgConsumption || 0,
+    stock: item.stock || 0, stock_retrabalho: item.stockRetrabalho || 0,
+    avg_forecast: item.avgForecast || 0, avg_consumption: item.avgConsumption || 0,
     in_transit: item.inTransit || 0, consumo_history: item.consumoHistory || {},
     forecast_history: item.forecastHistory || {}, transit_entries: item.transitEntries || [],
     updated_at: new Date().toISOString(),
@@ -2096,7 +2268,7 @@ async function loadMemsItems() {
   const { data, error } = await selectAll('materials', '*');
   if (error) { showToast('Erro ao carregar materiais: ' + error.message, 'err'); return []; }
   if (!data.length) {
-    const seeded = MEMS_SEED.map(i => ({ ...i, stock:0, avgForecast:0, avgConsumption:0, inTransit:0, consumoHistory:{}, forecastHistory:{}, transitEntries:[] }));
+    const seeded = MEMS_SEED.map(i => ({ ...i, stock:0, stockRetrabalho:0, avgForecast:0, avgConsumption:0, inTransit:0, consumoHistory:{}, forecastHistory:{}, transitEntries:[] }));
     if (isLoggedIn()) await saveMemsItems(seeded);
     return seeded;
   }

@@ -6,14 +6,16 @@
 
 -- ── PRODUTO ACABADO (PA) ──────────────────────────────────────────────
 create table if not exists pa_products (
-  code          text primary key,
-  description   text not null default '',
-  family        text not null default '',
-  stock         integer not null default 0,
-  stock_sa      integer not null default 0,
-  sales_history jsonb not null default '{}'::jsonb, -- { "2026-01": 120, ... }
-  updated_at    timestamptz not null default now()
+  code             text primary key,
+  description      text not null default '',
+  family           text not null default '',
+  stock            integer not null default 0,
+  stock_sa         integer not null default 0,
+  stock_retrabalho integer not null default 0, -- pendente de retrabalho (já somado em "stock")
+  sales_history    jsonb not null default '{}'::jsonb, -- { "2026-01": 120, ... }
+  updated_at       timestamptz not null default now()
 );
+alter table pa_products add column if not exists stock_retrabalho integer not null default 0;
 
 -- ── MATERIAIS (ME / MP / MS) ──────────────────────────────────────────
 create table if not exists materials (
@@ -25,6 +27,7 @@ create table if not exists materials (
   origin           text not null default '',
   lead_time        numeric,
   stock            numeric not null default 0,
+  stock_retrabalho numeric not null default 0, -- pendente de retrabalho (já somado em "stock")
   avg_forecast     numeric not null default 0,
   avg_consumption  numeric not null default 0,
   in_transit       numeric not null default 0,
@@ -33,6 +36,7 @@ create table if not exists materials (
   transit_entries  jsonb not null default '[]'::jsonb,  -- [ { qty, date }, ... ]
   updated_at       timestamptz not null default now()
 );
+alter table materials add column if not exists stock_retrabalho numeric not null default 0;
 
 -- ── METADADOS DE IMPORTAÇÃO DE MATERIAIS ──────────────────────────────
 -- 1 linha só (id fixo), guarda as datas da última importação de cada tipo
