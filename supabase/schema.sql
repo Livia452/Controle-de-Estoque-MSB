@@ -196,20 +196,22 @@ create policy profiles_read on profiles for select
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- VIEW pa_coverage — integração de leitura com o ACE-MSB (expedição/licitações)
--- Cobertura é sempre só estoque PA (stock, que já inclui o retrabalho) — SA
--- nunca entra na conta, pra esse app e o ACE-MSB nunca mostrarem números
--- diferentes do mesmo item por causa de um toggle de tela.
+-- Cobertura = (estoque PA + estoque SA) ÷ consumo médio (6 meses) — mesma regra
+-- do toggle "Incluir SA" marcado, que é o padrão da tela. Fixamos essa regra na
+-- view pra dar um número estável pro ACE-MSB, independente do toggle de cada
+-- sessão no app (ele pode ficar desmarcado por uma pessoa sem afetar a view).
 -- ═══════════════════════════════════════════════════════════════════════
 create or replace view pa_coverage as
 select
   p.code,
   p.description,
   p.family,
-  p.stock,                    -- estoque PA (já inclui retrabalho) — única base da cobertura
-  p.stock_sa,                 -- informativo apenas; não entra em avg_consumption/coverage_months
+  p.stock,
+  p.stock_sa,
+  (p.stock + p.stock_sa) as stock_total,   -- base da cobertura (PA + SA)
   coalesce(sh.avg_qty, 0) as avg_consumption,
   case when coalesce(sh.avg_qty, 0) > 0
-    then round(p.stock / sh.avg_qty, 2)
+    then round((p.stock + p.stock_sa) / sh.avg_qty, 2)
     else null  -- sem consumo nos últimos 6 meses = cobertura não aplicável ("sem giro"/infinita)
   end as coverage_months
 from pa_products p
