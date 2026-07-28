@@ -195,6 +195,37 @@ create policy profiles_read on profiles for select
 -- (usado pela função serverless api/create-user.js) grava nessa tabela.
 
 -- ═══════════════════════════════════════════════════════════════════════
+-- VIEW pa_coverage — integração de leitura com o ACE-MSB (expedição/licitações)
+-- Cobertura é sempre só estoque PA (stock, que já inclui o retrabalho) — SA
+-- nunca entra na conta, pra esse app e o ACE-MSB nunca mostrarem números
+-- diferentes do mesmo item por causa de um toggle de tela.
+-- ═══════════════════════════════════════════════════════════════════════
+create or replace view pa_coverage as
+select
+  p.code,
+  p.description,
+  p.family,
+  p.stock,                    -- estoque PA (já inclui retrabalho) — única base da cobertura
+  p.stock_sa,                 -- informativo apenas; não entra em avg_consumption/coverage_months
+  coalesce(sh.avg_qty, 0) as avg_consumption,
+  case when coalesce(sh.avg_qty, 0) > 0
+    then round(p.stock / sh.avg_qty, 2)
+    else null  -- sem consumo nos últimos 6 meses = cobertura não aplicável ("sem giro"/infinita)
+  end as coverage_months
+from pa_products p
+left join lateral (
+  select avg(coalesce(p.sales_history ->> to_char(d, 'YYYY-MM'), '0')::numeric) as avg_qty
+  from generate_series(
+    date_trunc('month', now()) - interval '6 months',
+    date_trunc('month', now()) - interval '1 month',
+    interval '1 month'
+  ) d
+) sh on true;
+
+-- view herda a policy de select de pa_products (leitura pública) automaticamente;
+-- não precisa de RLS própria.
+
+-- ═══════════════════════════════════════════════════════════════════════
 -- BOOTSTRAP DO PRIMEIRO ADMIN
 -- 1. Crie o primeiro usuário em Authentication → Users → Add user (Supabase).
 -- 2. Pegue o UUID dele (aparece na lista de usuários) e rode, trocando os

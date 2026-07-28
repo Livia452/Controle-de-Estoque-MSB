@@ -587,8 +587,12 @@ function avgConsumption(p) {
   const ms = getMonthlySales(p);
   return ms.reduce((a, b) => a + b, 0) / ms.length;
 }
+// Cobertura/status de PA são sempre calculados só com o estoque PA — SA é
+// informativo (aparece na tela), mas nunca entra na conta. Decisão tomada pra
+// evitar dois sistemas (esse app e a integração do ACE-MSB) mostrarem cobertura
+// diferente pro mesmo item dependendo de um toggle de tela.
 function effectiveStock(p) {
-  return p.stock + (dashFilters?.includeSA ? (p.stockSA || 0) : 0);
+  return p.stock;
 }
 function coverage(p) {
   const a = avgConsumption(p);
@@ -1123,7 +1127,7 @@ function buildKpis(products) {
   const counts = {};
   Object.keys(STATUS).forEach(k => { counts[STATUS[k]] = 0; });
   products.forEach(p => counts[productStatus(p)]++);
-  const saNote = dashFilters.includeSA && totalSA > 0 ? ` + ${fmt.int(totalSA)} SA` : '';
+  const saNote = totalSA > 0 ? ` + ${fmt.int(totalSA)} SA (não contabilizado na cobertura)` : '';
   const card = (dot, label, val, sub, cls='', onclick='') => `
     <div class="kpi">
       <p class="kpi-label${onclick?' clickable-cell':''}"${onclick?` onclick="${onclick}" title="Ver conteúdo"`:''}>${dot} ${label}</p>
@@ -1167,10 +1171,6 @@ function buildFilterBar(total, shown) {
       <input type="checkbox" id="f-dash-zero" ${dashFilters.hideZeroSales?'checked':''}>
       Ocultar sem vendas
     </label>
-    <label class="filter-toggle">
-      <input type="checkbox" id="f-dash-sa" ${dashFilters.includeSA?'checked':''}>
-      Incluir SA
-    </label>
     ${diff}
   </div>`;
 }
@@ -1180,7 +1180,7 @@ function buildTable(products) {
   const tHtml  = t => t.dir==='up'   ? `<span class="t-up"><i class="ti ti-trending-up" aria-hidden="true"></i> +${t.pct}%</span>`
                     : t.dir==='down' ? `<span class="t-down"><i class="ti ti-trending-down" aria-hidden="true"></i> -${t.pct}%</span>`
                     :                  `<span class="t-stable"><i class="ti ti-minus" aria-hidden="true"></i> Estável</span>`;
-  const hasSA = dashFilters.includeSA && sorted.some(p => SA_MAP[p.code] !== undefined);
+  const hasSA = sorted.some(p => SA_MAP[p.code] !== undefined);
   const colCount = hasSA ? 10 : 9;
   const rows = sorted.length ? sorted.map(p => {
     const cov = coverage(p); const sm = STATUS_META[productStatus(p)];
@@ -1313,7 +1313,7 @@ async function generateShareFile() {
    DASHBOARD VIEW
 ═══════════════════════════════════════════════ */
 const dashEl = document.getElementById('view-dashboard');
-let dashFilters = { search: '', family: '', linha: '', status: '', hideZeroSales: false, includeSA: true };
+let dashFilters = { search: '', family: '', linha: '', status: '', hideZeroSales: false };
 let chartView = 'curva-a';
 const CURVA_A_FAMILIES = ['SONDA BASKET', 'FIBRA LASER UROLOGIA', 'ELETRODO TEMPORARIO'];
 
@@ -1399,7 +1399,6 @@ function renderDashboard() {
   document.getElementById('f-dash-linha')?.addEventListener('change', e => { dashFilters.linha = e.target.value; renderDashboard(); });
   document.getElementById('f-dash-status')?.addEventListener('change', e => { dashFilters.status = e.target.value; renderDashboard(); });
   document.getElementById('f-dash-zero')?.addEventListener('change', e => { dashFilters.hideZeroSales = e.target.checked; renderDashboard(); });
-  document.getElementById('f-dash-sa')?.addEventListener('change', e => { dashFilters.includeSA = e.target.checked; renderDashboard(); });
   mountChart(filtered);
 }
 
