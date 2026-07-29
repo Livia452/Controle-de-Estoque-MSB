@@ -2582,9 +2582,13 @@ function memsWalkBranch(item, f, parents) {
   }
   return { factor, pathStock };
 }
-// Estoque efetivo = próprio + embutido na cadeia (soma de todos os ramos)
+// Estoque efetivo = próprio + embutido na cadeia (soma de todos os ramos).
+// Só faz sentido pra MP (consumida por SA/PA na estrutura) — ME e MS não
+// emprestam estoque de produto acabado pra cobrir a própria cobertura.
 function memsEffectiveStock(item) {
-  return (item.stock || 0) + memsEmbeddedStock(item);
+  const own = item.stock || 0;
+  if (item.type !== 'MP') return own;
+  return own + memsEmbeddedStock(item);
 }
 
 /* ── Ramos em risco ───────────────────────────────────────────────────────
@@ -2617,6 +2621,7 @@ function memsBomIndex() {
 // (memsAnticipationBranches). Com 1 só produto final não há o que "esconder" atrás
 // da soma agregada, então retorna vazio (mesma regra dos dois alertas).
 function memsAllBranchDetails(item) {
+  if (item.type !== 'MP') return []; // ramo em risco (cadeia) só se aplica à MP
   if (!memsBom.length) return [];
   const { byFinal, finalsByCode } = memsBomIndex();
   const finals = finalsByCode.get(item.code.toUpperCase());
