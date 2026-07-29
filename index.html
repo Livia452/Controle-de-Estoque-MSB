@@ -810,15 +810,31 @@ function paRowToProduct(row) {
     code: row.code, description: row.description, family: row.family,
     stock: row.stock, stockSA: row.stock_sa, stockRetrabalho: row.stock_retrabalho || 0,
     salesHistory: row.sales_history || {},
+    updatedAt: row.updated_at,
   });
 }
-function paProductToRow(p) {
+function paProductToRow(p, stamp) {
   return {
     code: p.code, description: p.description, family: p.family,
     stock: p.stock, stock_sa: p.stockSA, stock_retrabalho: p.stockRetrabalho || 0,
     sales_history: p.salesHistory || {},
-    updated_at: new Date().toISOString(),
+    updated_at: stamp,
   };
+}
+
+/* Data do dado mais recente gravado em pa_products. Rótulo genérico de
+   propósito ("dados atualizados"): qualquer gravação de PA move esse
+   carimbo — importação de estoque/SA/retrabalho, importação de vendas ou
+   edição manual de um produto. Não é especificamente a data do último
+   upload de estoque; para isso seria preciso uma tabela de meta própria,
+   nos moldes de materials_meta. */
+function lastDataUpdate(products) {
+  let max = null;
+  for (const p of products) {
+    const t = p.updatedAt ? Date.parse(p.updatedAt) : NaN;
+    if (Number.isFinite(t) && (max === null || t > max)) max = t;
+  }
+  return max === null ? null : new Date(max).toISOString();
 }
 
 const storage = {
@@ -835,8 +851,13 @@ const storage = {
   },
   async save(products) {
     if (!products.length) return;
-    const { error } = await sb.from('pa_products').upsert(products.map(paProductToRow));
+    // Um único carimbo por gravação, espelhado de volta nos objetos em
+    // memória — assim o "dados atualizados em" do painel reflete a
+    // importação que acabou de rodar, sem depender de um reload.
+    const stamp = new Date().toISOString();
+    const { error } = await sb.from('pa_products').upsert(products.map(p => paProductToRow(p, stamp)));
     if (error) throw new Error(error.message || JSON.stringify(error));
+    products.forEach(p => { p.updatedAt = stamp; });
   },
   async remove(code) {
     const { error } = await sb.from('pa_products').delete().eq('code', code);
@@ -967,7 +988,7 @@ const fmt = {
   dec:   n   => ptBR1.format(n),
   cov:   n   => Number.isFinite(n) ? ptBR1.format(n) + ' m' : '—',
   brl:   n   => (n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }),
-  dt:    ()  => new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }),
+  ts:    iso => iso ? new Date(iso).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : null,
   month: off => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth()+off); return d.toLocaleDateString('pt-BR', { month:'short', year:'2-digit' }); },
 };
 
@@ -1370,11 +1391,12 @@ let _searchTimer;
 function renderDashboard() {
   const all      = state.getAll();
   const filtered = applyFilters(all);
+  const lastUpd  = fmt.ts(lastDataUpdate(all));
   dashEl.innerHTML = `<div>
     <div class="dashboard-header">
       <div>
         <h1 class="page-title">Estoque de produto acabado</h1>
-        <p class="last-update">Atualizado em ${fmt.dt()}</p>
+        ${lastUpd ? `<p class="last-update">Dados atualizados em ${lastUpd}</p>` : ''}
       </div>
       <button class="btn btn-primary btn-sm" id="btn-share"><i class="ti ti-share" aria-hidden="true"></i> Compartilhar</button>
     </div>
