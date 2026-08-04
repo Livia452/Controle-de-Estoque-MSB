@@ -1196,12 +1196,20 @@ function buildFilterBar(total, shown) {
   </div>`;
 }
 
+/* A coluna Estoque SA é condicional: só aparece se o toggle estiver ligado
+   E algum produto da lista tiver SA. Fica num helper porque o export
+   precisa da MESMA resposta que a tabela — senão o arquivo sai com uma
+   coluna que a pessoa não viu na tela (ou sem uma que ela viu). */
+function showsSAColumn(products) {
+  return dashFilters.includeSA && products.some(p => SA_MAP[p.code] !== undefined);
+}
+
 function buildTable(products) {
   const sorted = [...products].sort((a, b) => coverage(a) - coverage(b));
   const tHtml  = t => t.dir==='up'   ? `<span class="t-up"><i class="ti ti-trending-up" aria-hidden="true"></i> +${t.pct}%</span>`
                     : t.dir==='down' ? `<span class="t-down"><i class="ti ti-trending-down" aria-hidden="true"></i> -${t.pct}%</span>`
                     :                  `<span class="t-stable"><i class="ti ti-minus" aria-hidden="true"></i> Estável</span>`;
-  const hasSA = dashFilters.includeSA && sorted.some(p => SA_MAP[p.code] !== undefined);
+  const hasSA = showsSAColumn(sorted);
   const colCount = hasSA ? 10 : 9;
   const rows = sorted.length ? sorted.map(p => {
     const cov = coverage(p); const sm = STATUS_META[productStatus(p)];
@@ -1398,7 +1406,10 @@ function renderDashboard() {
         <h1 class="page-title">Estoque de produto acabado</h1>
         ${lastUpd ? `<p class="last-update">Dados atualizados em ${lastUpd}</p>` : ''}
       </div>
-      <button class="btn btn-primary btn-sm" id="btn-share"><i class="ti ti-share" aria-hidden="true"></i> Compartilhar</button>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-ghost" id="btn-dash-export"${filtered.length ? '' : ' disabled'} title="${filtered.length ? 'Exporta os produtos com os filtros aplicados' : 'Nenhum produto para exportar'}"><i class="ti ti-download" aria-hidden="true"></i> Exportar Excel</button>
+        <button class="btn btn-primary btn-sm" id="btn-share"><i class="ti ti-share" aria-hidden="true"></i> Compartilhar</button>
+      </div>
     </div>
     ${buildKpis(all)}
     <div id="dash-table-anchor"></div>
@@ -1407,6 +1418,13 @@ function renderDashboard() {
     ${buildChartSection()}
   </div>`;
   document.getElementById('btn-share')?.addEventListener('click', generateShareFile);
+  document.getElementById('btn-dash-export')?.addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try { await exportDashboardXLSX(filtered, showsSAColumn(filtered)); }
+    catch (err) { showToast('Erro ao exportar: ' + err.message, 'err'); }
+    finally { btn.disabled = false; }
+  });
   document.getElementById('f-dash-search')?.addEventListener('input', e => {
     const pos = e.target.selectionStart;
     clearTimeout(_searchTimer);
@@ -4310,6 +4328,71 @@ async function downloadWorkbook(wb, filename) {
   const url = URL.createObjectURL(blob);
   Object.assign(document.createElement('a'), { href: url, download: filename }).click();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/* Export do painel de PA — exporta a lista JÁ FILTRADA e na mesma ordem da
+   tabela (cobertura crescente), para o arquivo bater exatamente com o que
+   está na tela. Números saem como número (não texto) para somar/ordenar no
+   Excel; cobertura infinita (consumo zero) vira célula vazia em vez de
+   "Infinity". A aba "Filtros" registra o recorte usado, senão um arquivo
+   filtrado circulando por e-mail vira estoque total na cabeça de quem
+   recebe. */
+async function exportDashboardXLSX(products, hasSA) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Controle de Estoque MSB';
+  wb.created = new Date();
+  const ws = wb.addWorksheet('Estoque PA', { views: [{ state: 'frozen', ySplit: 1 }] });
+  ws.columns = [
+    { header: 'Código',            key: 'code',    width: 18 },
+    { header: 'Descrição',         key: 'desc',    width: 52 },
+    { header: 'Família',           key: 'family',  width: 28 },
+    { header: 'Linha',             key: 'linha',   width: 13 },
+    { header: 'Estoque PA',        key: 'stock',   width: 12 },
+    ...(hasSA ? [{ header: 'Estoque SA', key: 'stockSA', width: 12 }] : []),
+    { header: 'Consumo médio/mês', key: 'consumo', width: 18 },
+    { header: 'Cobertura (meses)', key: 'cov',     width: 17 },
+    { header: 'Status',            key: 'status',  width: 14 },
+    { header: 'Tendência 6m',      key: 'trend',   width: 14 },
+  ];
+  styleHeaderRow(ws.getRow(1));
+
+  [...products].sort((a, b) => coverage(a) - coverage(b)).forEach(p => {
+    const cov = coverage(p);
+    const t   = salesTrend(p);
+    const row = ws.addRow({
+      code: p.code, desc: p.description, family: p.family || '', linha: productLine(p),
+      stock: p.stock || 0, stockSA: p.stockSA || 0,
+      consumo: avgConsumption(p),
+      cov: Number.isFinite(cov) ? cov : null,
+      status: STATUS_META[productStatus(p)].label,
+      trend: t.dir === 'up' ? t.pct / 100 : t.dir === 'down' ? -t.pct / 100 : 0,
+    });
+    row.getCell('stock').numFmt   = '#,##0';
+    if (hasSA) row.getCell('stockSA').numFmt = '#,##0';
+    row.getCell('consumo').numFmt = '#,##0';
+    row.getCell('cov').numFmt     = '#,##0.0';
+    row.getCell('trend').numFmt   = '+0%;-0%;"Estável"';
+  });
+  ws.autoFilter = { from: 'A1', to: `${String.fromCharCode(64 + ws.columns.length)}1` };
+
+  const f   = dashFilters;
+  const all = state.getAll();
+  const ws2 = wb.addWorksheet('Filtros');
+  ws2.columns = [{ header: 'Filtro', key: 'k', width: 26 }, { header: 'Valor', key: 'v', width: 46 }];
+  styleHeaderRow(ws2.getRow(1));
+  [
+    ['Busca',                f.search || '(nenhuma)'],
+    ['Família',              f.family || 'Todas as famílias'],
+    ['Linha',                f.linha  || 'Todas as linhas'],
+    ['Status',               f.status ? STATUS_META[f.status].label : 'Todos os status'],
+    ['Ocultar sem vendas',   f.hideZeroSales ? 'Sim' : 'Não'],
+    ['Incluir SA',           f.includeSA ? 'Sim (cobertura soma PA + SA)' : 'Não (cobertura só PA)'],
+    ['Produtos exportados',  `${products.length} de ${all.length}`],
+    ['Dados atualizados em', fmt.ts(lastDataUpdate(all)) || '(sem carimbo)'],
+    ['Exportado em',         new Date().toLocaleString('pt-BR')],
+  ].forEach(([k, v]) => ws2.addRow({ k, v }));
+
+  await downloadWorkbook(wb, `estoque_pa_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
 async function exportValidadeXLSX(rows, products) {
