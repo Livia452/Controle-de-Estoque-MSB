@@ -184,12 +184,31 @@ create policy slow_moving_analysis_read  on slow_moving_analysis for select usin
 create policy slow_moving_analysis_write on slow_moving_analysis for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
+-- is_admin roda como security definer (ignora RLS internamente) para checar
+-- o papel do usuário sem reacionar a própria policy de profiles. Uma policy
+-- que consulta a mesma tabela que protege (ex.: `exists (select 1 from
+-- profiles ...)` direto na policy) causa "infinite recursion detected in
+-- policy for relation profiles" no Postgres — o PostgREST devolve isso como
+-- um 500 genérico, sem indicar que é RLS. Foi assim que a leitura do próprio
+-- profile quebrava silenciosamente pra todo mundo (loadCurrentProfile trata
+-- erro como "sem perfil", então o sintoma era só o botão "Gerenciar
+-- usuários" nunca aparecer — nem pra quem já era admin no banco).
+create or replace function public.is_admin(uid uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (select 1 from profiles where id = uid and role = 'admin');
+$$;
+
 drop policy if exists profiles_read  on profiles;
 drop policy if exists profiles_write on profiles;
 create policy profiles_read on profiles for select
   using (
     auth.uid() = id
-    or exists (select 1 from profiles p where p.id = auth.uid() and p.role = 'admin')
+    or public.is_admin(auth.uid())
   );
 -- nenhuma policy de insert/update/delete criada de propósito: só o service_role
 -- (usado pela função serverless api/create-user.js) grava nessa tabela.
