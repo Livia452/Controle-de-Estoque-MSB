@@ -811,6 +811,7 @@ function paRowToProduct(row) {
     stock: row.stock, stockSA: row.stock_sa, stockRetrabalho: row.stock_retrabalho || 0,
     salesHistory: row.sales_history || {},
     updatedAt: row.updated_at,
+    saCode: row.sa_code || null,
   });
 }
 function paProductToRow(p, stamp) {
@@ -819,6 +820,7 @@ function paProductToRow(p, stamp) {
     stock: p.stock, stock_sa: p.stockSA, stock_retrabalho: p.stockRetrabalho || 0,
     sales_history: p.salesHistory || {},
     updated_at: stamp,
+    sa_code: p.saCode || null,
   };
 }
 
@@ -886,6 +888,7 @@ const state = (() => {
       stockSA:         Math.max(0, Math.round(Number(data.stockSA) || 0)),
       stockRetrabalho: Math.max(0, Math.round(Number(data.stockRetrabalho) || 0)),
       salesHistory:    data.salesHistory || {},
+      saCode:          data.saCode ? String(data.saCode).trim().toUpperCase() : null,
     };
   }
 
@@ -1065,13 +1068,14 @@ function aggregateStock(rows) {
    senão as vendas lançadas sob o código SA ficam de fora do histórico do produto. */
 function aggregateSales(rows) {
   const map = {};
+  const saMap = saReverseMap();
   let skipped = 0;
   for (const row of rows) {
     let code    = String(row[COL_SALES.code] || '').trim();
     const saida = String(row[COL_SALES.exit] || '').trim();
     const receb = String(row[COL_SALES.receipt] || '').trim();
     if (!code || (!saida && !receb)) { skipped++; continue; }
-    const paCode = SA_REVERSE_MAP[code.toUpperCase()];
+    const paCode = saMap[code.toUpperCase()];
     if (paCode) code = paCode;
 
     const qty = toNum(row[COL_SALES.qty]);
@@ -1201,7 +1205,7 @@ function buildFilterBar(total, shown) {
    precisa da MESMA resposta que a tabela — senão o arquivo sai com uma
    coluna que a pessoa não viu na tela (ou sem uma que ela viu). */
 function showsSAColumn(products) {
-  return dashFilters.includeSA && products.some(p => SA_MAP[p.code] !== undefined);
+  return dashFilters.includeSA && products.some(p => !!p.saCode);
 }
 
 function buildTable(products) {
@@ -1346,8 +1350,12 @@ let dashFilters = { search: '', family: '', linha: '', status: '', hideZeroSales
 let chartView = 'curva-a';
 const CURVA_A_FAMILIES = ['SONDA BASKET', 'FIBRA LASER UROLOGIA', 'ELETRODO TEMPORARIO'];
 
-// PA → SA code mapping (source: "SA de cada PA.xlsx", 91 pares)
-const SA_MAP = {
+// Mapa PA → SA original (fonte: "SA de cada PA.xlsx", 91 pares). Usado só
+// como seed de backfill (ver backfillSaCodes) — o vínculo vivo de cada
+// produto agora é o campo saCode, editável pelo cadastro e gravado em
+// pa_products.sa_code. Depois do backfill, esta constante nunca mais é a
+// fonte de verdade: só existe pra preencher quem ainda não tem sa_code.
+const SA_CODE_SEED = {
   '55011':'SA55011','55012':'SA55012','55004':'SA55004','55005':'SA55005',
   '66040':'SA66040','VCDC-5100JL3.5':'SA-VCDC-5100JL3.5',
   '58034':'SA58034','58036':'SA58036','58148':'SA58148',
@@ -1361,7 +1369,8 @@ const SA_MAP = {
   '58440':'SA58440','51381':'SA51381','51382':'SA51382',
   '51394':'SA51394','51395':'SA51395','51396':'SA51396',
   '51397':'SA51397','UFGH-032150RHS':'SA-UFGH-032150RHS',
-  'UFGH-035150RHS':'SA-UFGH-035150RHS','67009':'SA67009',
+  'UFGH-035150RHS':'SA-UFGH-035150RHS','UFGH-035150RHR':'SA-UFGH-035150RHR',
+  '67009':'SA67009',
   '61001':'SA61001','57304':'SA57304','57609':'SA57609',
   '57109':'SA57109','57502':'SA57502','57602':'SA57602',
   '57604':'SA57604','57505':'SA57505','57606':'SA57606',
@@ -1382,7 +1391,28 @@ const SA_MAP = {
   'VCET-6110CK1':'SA-VCET-6110CK1','VCET-7110CK1':'SA-VCET-7110CK1',
   '67010':'SA67010','67011':'SA67011','67012':'SA67012',
 };
-const SA_REVERSE_MAP = Object.fromEntries(Object.entries(SA_MAP).map(([pa,sa]) => [sa.toUpperCase(), pa]));
+
+/* SA → PA, calculado na hora a partir do saCode gravado em cada produto (não
+   mais do SA_CODE_SEED estático) — assim um vínculo criado ou corrigido no
+   cadastro vale imediatamente pra importação de estoque/vendas, sem precisar
+   de deploy novo. */
+function saReverseMap() {
+  const map = {};
+  state.getAll().forEach(p => { if (p.saCode) map[p.saCode.toUpperCase()] = p.code; });
+  return map;
+}
+
+/* Preenche pa_products.sa_code a partir do SA_CODE_SEED só onde ainda não há
+   nada gravado — nunca sobrescreve um vínculo editado manualmente pelo
+   cadastro. Roda uma vez por sessão autenticada, no boot, no mesmo padrão de
+   syncMemsSeedAdditions. */
+async function backfillSaCodes() {
+  if (!isLoggedIn()) return;
+  const missing = state.getAll().filter(p => !p.saCode && SA_CODE_SEED[p.code]);
+  if (!missing.length) return;
+  missing.forEach(p => { p.saCode = SA_CODE_SEED[p.code]; });
+  await storage.save(missing);
+}
 
 function applyFilters(products) {
   let list = products;
@@ -1698,12 +1728,13 @@ async function handleStockFile(file) {
     if (!items.length) { showToast('Nenhum item encontrado. Verifique as colunas do arquivo.', 'err'); return; }
     const memsCodeSet = new Set(memsItems.map(i => i.code.toUpperCase()));
     const paCodeSet   = new Set(state.getAll().map(p => p.code.toUpperCase()));
+    const saMap       = saReverseMap();
     // Nós da estrutura que não vivem em nenhum outro cadastro (ex: PIs) — estoque vai para memsBomStock
     const bomNodeSet  = new Set(memsBom.flatMap(e => [String(e.code).toUpperCase(), String(e.parent).toUpperCase()]));
     const paItems = [], saItems = [], memsMatched = [], bomMatched = [];
     for (const item of items) {
       const code = String(item.code).toUpperCase().trim();
-      const paCode = SA_REVERSE_MAP[code];
+      const paCode = saMap[code];
       if (paCode) saItems.push({ ...item, saCode: code, code: String(paCode).toUpperCase().trim() });
       else if (memsCodeSet.has(code)) memsMatched.push({ ...item, code });
       else if (!paCodeSet.has(code) && bomNodeSet.has(code)) bomMatched.push({ ...item, code });
@@ -1997,12 +2028,18 @@ function onSaveManual() {
     return;
   }
 
-  const family = document.getElementById('f-family')?.value || '';
+  const family  = document.getElementById('f-family')?.value || '';
+  const saCode  = document.getElementById('f-sa-code')?.value.trim() || null;
+  if (saCode) {
+    const upperCode = code.toUpperCase();
+    const dup = state.getAll().find(x => x.code !== upperCode && x.saCode?.toUpperCase() === saCode.toUpperCase());
+    if (dup) { errEl.textContent = `Código SA "${saCode}" já está vinculado ao produto ${dup.code}.`; return; }
+  }
   const existing = state.getByCode(code);
   state.addOrUpdate({
     code, description: desc, family, stock: existing?.stock ?? 0,
     stockSA: existing?.stockSA ?? 0, stockRetrabalho: existing?.stockRetrabalho ?? 0,
-    salesHistory: existing?.salesHistory ?? {},
+    salesHistory: existing?.salesHistory ?? {}, saCode,
   });
   closeProductModal();
   showToast(`Produto ${code.toUpperCase()} salvo.`);
@@ -2575,7 +2612,7 @@ function memsNodeStock(code) {
   const upper = String(code).toUpperCase();
   const mat = memsItems.find(i => i.code.toUpperCase() === upper);
   if (mat) return mat.stock || 0;
-  const paFromSA = SA_REVERSE_MAP[upper];
+  const paFromSA = saReverseMap()[upper];
   if (paFromSA) return state.getByCode(paFromSA)?.stockSA || 0;
   const pa = state.getByCode(upper);
   if (pa) return pa.stock || 0;
@@ -4600,6 +4637,7 @@ async function boot() {
     slowMovingCurated = slowMoving;
     await syncMemsSeedAdditions();
     await syncSlowMovingSeed();
+    await backfillSaCodes();
   } catch (err) {
     showToast('Erro ao carregar dados: ' + err.message, 'err');
   } finally {
@@ -4726,6 +4764,12 @@ function renderProductModalBody(code) {
         <select class="field-input filter-select" id="f-family" style="max-width:320px">
           <option value="">— Selecione a família —</option>${famOpts}
         </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="f-sa-code">Código SA (opcional)</label>
+        <input class="field-input" id="f-sa-code" type="text" placeholder="ex: SA-UFGH-035150RHR" style="max-width:280px"
+          value="${isEdit ? (p.saCode || '') : ''}">
+        <p style="font-size:12px;color:var(--hint);margin-top:4px">Vincula este PA ao código de estoque secundário/consignado do Dynamics. Deixe em branco se este produto não tiver SA.</p>
       </div>
       <p style="font-size:12px;color:var(--hint);margin-bottom:16px">Estoque e vendas mensais são atualizados via importação de planilha.</p>
       <p class="field-error" id="form-error" role="alert" aria-live="polite"></p>
@@ -4880,9 +4924,10 @@ function openMemsCoverageModal(code) {
   const item = memsItems.find(i => i.code.toUpperCase() === String(code).toUpperCase());
   if (!item) return;
   const factors = memsDownstreamFactors(item.code);
+  const saMap = saReverseMap();
   const nodeType = c => {
     if (memsItems.some(i => i.code.toUpperCase() === c)) return memsItems.find(i => i.code.toUpperCase() === c).type || 'MAT';
-    if (SA_REVERSE_MAP[c]) return 'SA';
+    if (saMap[c]) return 'SA';
     if (state.getByCode(c)) return 'PA';
     if (c.startsWith('PI')) return 'PI';
     return '—';
