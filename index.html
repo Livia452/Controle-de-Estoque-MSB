@@ -73,6 +73,11 @@ input,select{font-family:inherit;font-size:14px}
 .crit-chip strong{color:var(--danger-text)}
 .crit-chip-desc{color:var(--muted);font-size:11px}
 .crit-more{display:inline-flex;align-items:center;padding:4px 10px;border-radius:20px;font-size:12px;color:var(--muted);border:1px dashed var(--border-med)}
+/* Variante "saiu do crítico" do alerta acima — mesma estrutura, cor ok/verde */
+.alert-ok{background:var(--ok-bg);border:1px solid var(--ok-text);border-left:4px solid var(--ok-text);border-radius:0 var(--r-md) var(--r-md) 0;padding:14px 16px;margin-bottom:1.25rem}
+.alert-ok-hd{display:flex;align-items:center;gap:8px;color:var(--ok-text);font-size:13px;font-weight:500;margin-bottom:10px}
+.ok-chip{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--ok-text);border-radius:20px;padding:4px 10px;font-size:12px}
+.ok-chip strong{color:var(--ok-text)}
 /* Modal */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:1000;padding:24px}
 .modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 8px 32px rgba(0,0,0,.18);width:100%;max-width:540px;max-height:90vh;display:flex;flex-direction:column}
@@ -603,6 +608,69 @@ function productStatus(p) {
   if (c >= 1)  return STATUS.WARN;
   return STATUS.CRIT;
 }
+
+/* Status "oficial" — sempre com SA incluído, independente do toggle "Incluir
+   SA" da sessão de quem está com a tela aberta. Mesma regra fixa que a view
+   pa_coverage do Supabase já usa pro ACE-MSB (ver supabase/schema.sql):
+   um número estável, que não muda sozinho só porque alguém desmarcou um
+   filtro no próprio navegador. Usado só para o histórico persistido de
+   entrada/saída de crítico (pa_critical_changes) — a tela e os filtros
+   continuam usando productStatus/coverage normalmente. */
+function officialCoverage(p) {
+  const eff = p.stock + (p.stockSA || 0);
+  const a = avgConsumption(p);
+  return a > 0 ? eff / a : Infinity;
+}
+function officialStatus(p) {
+  const eff = p.stock + (p.stockSA || 0);
+  if (eff === 0 && avgConsumption(p) === 0) return STATUS.NOGIRO;
+  const c = officialCoverage(p);
+  if (!Number.isFinite(c) || c > 12) return STATUS.EXCESS;
+  if (c >= 6)  return STATUS.HIGH;
+  if (c >= 2)  return STATUS.OK;
+  if (c >= 1)  return STATUS.WARN;
+  return STATUS.CRIT;
+}
+// { CODE: description } de todo PA oficialmente crítico agora — a "foto"
+// que é comparada antes/depois de cada atualização de estoque/retrabalho/vendas.
+function criticalSnapshot() {
+  const map = {};
+  state.getAll().forEach(p => { if (officialStatus(p) === STATUS.CRIT) map[p.code] = p.description; });
+  return map;
+}
+
+/* ── Mudanças de criticidade (entrou/saiu do crítico a cada atualização) ──
+   pa_critical_changes é 1 linha só (igual materials_meta): sempre é
+   SOBRESCRITA, nunca acumulada — o painel mostra "o que mudou na última
+   atualização", não um histórico completo. Um resultado vazio (nada mudou)
+   também é gravado de propósito, com o carimbo de agora: é mais honesto
+   dizer "nada mudou nesta atualização" do que deixar uma lista antiga (de
+   2 importações atrás) parecendo que acabou de acontecer. */
+let paCriticalChanges = { entered: [], exited: [], computedAt: null };
+
+async function loadPaCriticalChanges() {
+  const { data, error } = await sb.from('pa_critical_changes').select('*').eq('id', true).maybeSingle();
+  if (error || !data) return { entered: [], exited: [], computedAt: null };
+  return { entered: data.entered || [], exited: data.exited || [], computedAt: data.computed_at };
+}
+async function savePaCriticalChanges(entered, exited) {
+  const computedAt = new Date().toISOString();
+  const { error } = await sb.from('pa_critical_changes').update({
+    entered, exited, computed_at: computedAt,
+  }).eq('id', true);
+  if (error) { showToast('Erro ao salvar mudanças de criticidade: ' + error.message, 'err'); return; }
+  paCriticalChanges = { entered, exited, computedAt };
+}
+// Compara o "before" (tirado ANTES da mutação, por quem importou) com o
+// estado atual, e grava quem entrou/saiu do crítico nesta atualização.
+async function recordCriticalChange(before) {
+  const after = criticalSnapshot();
+  const entered = Object.keys(after).filter(c => !(c in before)).map(c => ({ code: c, description: after[c] }));
+  const exited  = Object.keys(before).filter(c => !(c in after)).map(c => ({ code: c, description: before[c] }));
+  await savePaCriticalChanges(entered, exited);
+  if (activeTab === 'dashboard') renderDashboard();
+}
+
 function salesTrend(p) {
   const ms   = getMonthlySales(p);
   const aOld = (ms[0]+ms[1]+ms[2]) / 3;
@@ -1166,6 +1234,88 @@ function buildKpis(products) {
 
 function buildAlert() { return ''; }
 
+/* ── Mudanças de criticidade + estrutura (MP) dos críticos ──────────────── */
+function buildCriticalChangesSection() {
+  const { entered, exited, computedAt } = paCriticalChanges;
+  const mpButton = `<div style="margin-bottom:1.25rem">
+      <button class="btn btn-ghost btn-sm" id="btn-crit-mp"><i class="ti ti-flask" aria-hidden="true"></i> Estrutura dos críticos (MP)</button>
+    </div>`;
+  if (!computedAt) return mpButton;
+
+  const stamp = fmt.ts(computedAt);
+  const MAX = 8;
+  const chips = (items, cls) => {
+    const shown = items.slice(0, MAX).map(i => {
+      const d = i.description || '';
+      const short = d.length > 30 ? d.slice(0, 30) + '…' : d;
+      return `<span class="${cls}"><strong>${i.code}</strong>${short ? `<span class="crit-chip-desc">${short}</span>` : ''}</span>`;
+    }).join('');
+    const more = items.length > MAX
+      ? `<span class="crit-more clickable-cell" onclick="openCriticalChangesModal()" title="Ver lista completa">+${items.length - MAX} mais</span>`
+      : '';
+    return shown + more;
+  };
+  const enteredBlock = entered.length ? `<div class="alert-crit">
+      <div class="alert-crit-hd"><i class="ti ti-trending-up" aria-hidden="true"></i> ${entered.length} ${entered.length===1?'produto entrou':'produtos entraram'} em Crítico
+        <span class="alert-crit-sub clickable-cell" onclick="openCriticalChangesModal()">desde ${stamp} · ver detalhes</span></div>
+      <div class="alert-crit-chips">${chips(entered, 'crit-chip')}</div>
+    </div>` : '';
+  const exitedBlock = exited.length ? `<div class="alert-ok">
+      <div class="alert-ok-hd"><i class="ti ti-trending-down" aria-hidden="true"></i> ${exited.length} ${exited.length===1?'produto saiu':'produtos saíram'} de Crítico
+        <span class="alert-crit-sub clickable-cell" onclick="openCriticalChangesModal()">desde ${stamp} · ver detalhes</span></div>
+      <div class="alert-crit-chips">${chips(exited, 'ok-chip')}</div>
+    </div>` : '';
+  const nothingChanged = (!entered.length && !exited.length)
+    ? `<p class="last-update" style="margin-bottom:1.25rem">Nenhuma mudança de criticidade desde a atualização de ${stamp}.</p>`
+    : '';
+  return `${enteredBlock}${exitedBlock}${nothingChanged}${mpButton}`;
+}
+
+// Lista completa de quem entrou/saiu do crítico na última atualização
+// (pa_critical_changes) — os chips na tela mostram só os primeiros.
+function openCriticalChangesModal() {
+  const { entered, exited, computedAt } = paCriticalChanges;
+  const stamp = computedAt ? fmt.ts(computedAt) : '—';
+  const row = (i, dir) => `<tr>
+    <td><strong>${i.code}</strong></td>
+    <td class="td-desc"><div title="${(i.description||'').replace(/"/g,'&quot;')}">${i.description||''}</div></td>
+    <td>${dir === 'in' ? '<span class="badge b-crit">🔴 Entrou</span>' : '<span class="badge b-ok">🟢 Saiu</span>'}</td>
+  </tr>`;
+  const rows = [...entered.map(i => row(i, 'in')), ...exited.map(i => row(i, 'out'))].join('');
+  const total = entered.length + exited.length;
+  openDetailModal(
+    `Mudanças de criticidade — ${total} produto${total===1?'':'s'}`,
+    `Comparação entre o conjunto de PAs críticos antes e depois da atualização de ${stamp} (estoque, retrabalho ou vendas). Sempre calculado com SA incluído, independente do toggle "Incluir SA" da tela.`,
+    `<tr><th>Código</th><th>Descrição</th><th>Mudança</th></tr>`,
+    rows, 3
+  );
+}
+
+// Pra cada PA atualmente crítico (mesmo critério do card 🔴 acima, respeitando
+// o toggle "Incluir SA" da tela), analisa se há MP vinculada na Estrutura.
+function openCriticalMpModal() {
+  const criticals = state.getAll().filter(p => productStatus(p) === STATUS.CRIT).sort((a, b) => coverage(a) - coverage(b));
+  const rows = criticals.map(p => {
+    const info = paMpStatus(p.code);
+    const statusCell = info.hasMP ? `<span class="badge b-ok">Sim</span>`
+      : info.hasAny ? `<span class="badge b-warn">Só ME/MS</span>`
+      : `<span class="badge b-crit">Sem estrutura</span>`;
+    const matList = info.materials.length ? info.materials.map(m => `${m.code} (${m.type})`).join(', ') : '—';
+    return `<tr>
+      <td><strong>${p.code}</strong></td>
+      <td class="td-desc"><div title="${p.description.replace(/"/g,'&quot;')}">${p.description}</div></td>
+      <td>${statusCell}</td>
+      <td style="font-size:11px;color:var(--muted)">${matList}</td>
+    </tr>`;
+  }).join('');
+  openDetailModal(
+    `Estrutura (MP) dos críticos — ${criticals.length} produto${criticals.length===1?'':'s'}`,
+    'Pra cada PA crítico, verifica se há matéria-prima vinculada na Estrutura (Controle de Matérias). "Só ME/MS" = tem estrutura cadastrada mas nenhuma MP nela; "Sem estrutura" = este PA não tem BOM vinculada — não dá pra saber o que comprar pra repor.',
+    `<tr><th>Código</th><th>Descrição</th><th>Tem MP?</th><th>Materiais vinculados</th></tr>`,
+    rows, 4
+  );
+}
+
 function buildFilterBar(total, shown) {
   const opts = FAMILIES.map(f =>
     `<option value="${f}" ${dashFilters.family===f?'selected':''}>${f}</option>`).join('');
@@ -1442,12 +1592,14 @@ function renderDashboard() {
       </div>
     </div>
     ${buildKpis(all)}
+    ${buildCriticalChangesSection()}
     <div id="dash-table-anchor"></div>
     ${buildFilterBar(all.length, filtered.length)}
     ${buildTable(filtered)}
     ${buildChartSection()}
   </div>`;
   document.getElementById('btn-share')?.addEventListener('click', generateShareFile);
+  document.getElementById('btn-crit-mp')?.addEventListener('click', openCriticalMpModal);
   document.getElementById('btn-dash-export')?.addEventListener('click', async e => {
     const btn = e.currentTarget;
     btn.disabled = true;
@@ -1805,8 +1957,10 @@ async function applyStockImport() {
   showLoading('Salvando estoque…');
   try {
     const { paItems, saItems, memsMatched, bomMatched = [] } = pendingStock;
+    const criticalBefore = (paItems.length || saItems.length) ? criticalSnapshot() : null;
     if (paItems.length) await state.applyStockImport(paItems);
     if (saItems.length) await state.applyStockSAImport(saItems);
+    if (criticalBefore) await recordCriticalChange(criticalBefore);
     if (memsMatched.length) {
       memsItems.forEach(i => { i.stock = 0; });
       memsMatched.forEach(item => {
@@ -1919,7 +2073,9 @@ async function applyRetrabalhoImport() {
   showLoading('Salvando retrabalho…');
   try {
     const { paItems, mpItems } = pendingRetrabalho;
+    const criticalBefore = paItems.length ? criticalSnapshot() : null;
     await state.applyRetrabalhoImport(paItems);
+    if (criticalBefore) await recordCriticalChange(criticalBefore);
     memsItems.forEach(i => { i.stock -= (i.stockRetrabalho || 0); i.stockRetrabalho = 0; });
     mpItems.forEach(item => {
       const existing = memsItems.find(i => i.code.toUpperCase() === item.code);
@@ -1988,8 +2144,10 @@ function cancelSalesImport() {
 function applySalesImport() {
   if (!pendingSales) return;
   showLoading('Atualizando vendas…');
-  setTimeout(() => {
-    state.applySalesImport(pendingSales.salesMap);
+  setTimeout(async () => {
+    const criticalBefore = criticalSnapshot();
+    await state.applySalesImport(pendingSales.salesMap);
+    await recordCriticalChange(criticalBefore);
     const n = Object.keys(pendingSales.salesMap).length;
     const m = pendingSales.months.map(fmtMonthKey).join(', ');
     hideLoading();
@@ -2605,6 +2763,46 @@ function memsBomParents(code) {
 function memsHasParents(code) {
   const upper = String(code).toUpperCase();
   return memsBom.some(e => String(e.code).toUpperCase() === upper);
+}
+// Inverso de memsBomParents: dado um nó (PA, PI ou material), quem ele
+// consome diretamente (1 nível abaixo).
+function memsBomChildren(parentCode) {
+  const upper = String(parentCode).toUpperCase();
+  const seen = {};
+  memsBom.forEach(e => {
+    if (String(e.parent).toUpperCase() !== upper) return;
+    const c = String(e.code).toUpperCase();
+    if (!seen[c]) seen[c] = { code: c, qty: e.qty || 1 };
+  });
+  return Object.values(seen);
+}
+// Materiais (memsItems) alcançáveis descendo a estrutura a partir de um PA —
+// atravessa nós intermediários (PIs) até achar folhas que são material
+// cadastrado. BFS com guarda anti-ciclo, mesmo padrão de memsDownstreamFactors.
+function materialsBelow(code) {
+  const found = new Map(); // materialCode -> item
+  const visited = new Set();
+  const queue = [String(code).toUpperCase()];
+  let guard = 0;
+  while (queue.length && guard++ < 5000) {
+    const node = queue.shift();
+    if (visited.has(node)) continue;
+    visited.add(node);
+    memsBomChildren(node).forEach(child => {
+      const mat = memsItems.find(i => i.code.toUpperCase() === child.code);
+      if (mat) found.set(mat.code, mat);
+      else queue.push(child.code); // nó intermediário (PI) — continua descendo
+    });
+  }
+  return [...found.values()];
+}
+// Análise "tem MP?" de um PA crítico: distingue "sem estrutura cadastrada"
+// de "tem estrutura, mas só ME/MS" de "tem MP" — porque pra quem vai decidir
+// uma compra, essas três situações pedem ações bem diferentes.
+function paMpStatus(paCode) {
+  const materials = materialsBelow(paCode);
+  const hasMP = materials.some(m => m.type === 'MP');
+  return { hasMP, hasAny: materials.length > 0, materials };
 }
 // Estoque de um nó da estrutura, onde quer que ele viva: materiais (memsItems),
 // SA (estoque secundário do PA), PA (painel de indicadores) ou capturado no import (PIs)
@@ -4617,7 +4815,7 @@ async function boot() {
     currentSession = sessionData?.session ?? null;
     await loadCurrentProfile();
 
-    const [products, materials, meta, bom, bomStock, lots, lotStock, slowMoving] = await Promise.all([
+    const [products, materials, meta, bom, bomStock, lots, lotStock, slowMoving, criticalChanges] = await Promise.all([
       storage.load(),
       loadMemsItems(),
       loadMemsMeta(),
@@ -4626,6 +4824,7 @@ async function boot() {
       loadPaLots(),
       loadPaLotStock(),
       loadSlowMoving(),
+      loadPaCriticalChanges(),
     ]);
     state._setAll(products);
     memsItems    = materials;
@@ -4635,6 +4834,7 @@ async function boot() {
     paLots       = lots;
     paLotStock   = lotStock;
     slowMovingCurated = slowMoving;
+    paCriticalChanges = criticalChanges;
     await syncMemsSeedAdditions();
     await syncSlowMovingSeed();
     await backfillSaCodes();

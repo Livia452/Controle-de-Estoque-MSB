@@ -114,6 +114,22 @@ create table if not exists slow_moving_analysis (
   updated_at  timestamptz not null default now()
 );
 
+-- ── MUDANÇAS DE CRITICIDADE DE PA (Painel de indicadores) ─────────────
+-- 1 linha só (id fixo) — guarda o resultado da última comparação entre o
+-- conjunto de PAs críticos ANTES e DEPOIS de uma atualização (estoque,
+-- retrabalho ou vendas). "Crítico" aqui é sempre calculado com SA incluído
+-- (mesma regra fixa da view pa_coverage), independente do toggle "Incluir
+-- SA" de quem está com a tela aberta — senão o histórico mudaria sozinho
+-- só porque alguém desmarcou um filtro na própria sessão.
+create table if not exists pa_critical_changes (
+  id          boolean primary key default true,
+  entered     jsonb not null default '[]'::jsonb, -- [{code,description}] que ficaram críticos nesta atualização
+  exited      jsonb not null default '[]'::jsonb, -- [{code,description}] que deixaram de ser críticos nesta atualização
+  computed_at timestamptz,
+  constraint pa_critical_changes_single_row check (id)
+);
+insert into pa_critical_changes (id) values (true) on conflict (id) do nothing;
+
 -- ── USUÁRIOS / PAPÉIS ──────────────────────────────────────────────────
 -- ligada ao login do Supabase (auth.users); role controla quem vê "Gerenciar usuários"
 create table if not exists profiles (
@@ -136,6 +152,7 @@ alter table materials_meta      enable row level security;
 alter table materials_bom       enable row level security;
 alter table materials_bom_stock enable row level security;
 alter table slow_moving_analysis enable row level security;
+alter table pa_critical_changes  enable row level security;
 alter table profiles            enable row level security;
 
 drop policy if exists pa_lots_read  on pa_lots;
@@ -184,6 +201,12 @@ drop policy if exists slow_moving_analysis_read  on slow_moving_analysis;
 drop policy if exists slow_moving_analysis_write on slow_moving_analysis;
 create policy slow_moving_analysis_read  on slow_moving_analysis for select using (true);
 create policy slow_moving_analysis_write on slow_moving_analysis for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+drop policy if exists pa_critical_changes_read  on pa_critical_changes;
+drop policy if exists pa_critical_changes_write on pa_critical_changes;
+create policy pa_critical_changes_read  on pa_critical_changes for select using (true);
+create policy pa_critical_changes_write on pa_critical_changes for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 -- is_admin roda como security definer (ignora RLS internamente) para checar
