@@ -1306,18 +1306,22 @@ function openCriticalMpModal() {
     const gargalo = info.bottleneck
       ? `${info.bottleneck.code} — estoque ${fmt.int(info.bottleneck.stock)} (precisa ${Math.round(info.bottleneck.perUnit*1000)/1000}/un.)`
       : '—';
+    const chegada = info.bottleneck?.arrivalDate
+      ? `${info.bottleneck.arrivalDate.toLocaleDateString('pt-BR')} · ${fmt.int(info.bottleneck.arrivalQty)} un.`
+      : '—';
     return `<tr>
       <td><strong>${p.code}</strong></td>
       <td class="td-desc"><div title="${p.description.replace(/"/g,'&quot;')}">${p.description}</div></td>
       <td>${statusCell}</td>
       <td style="font-size:11px;color:var(--muted)">${gargalo}</td>
+      <td style="font-size:11px;color:var(--muted)">${chegada}</td>
     </tr>`;
   }).join('');
   openDetailModal(
     `Estrutura (MP) dos críticos — ${criticals.length} produto${criticals.length===1?'':'s'}`,
-    'Pra cada PA crítico, calcula quantas unidades dá pra produzir HOJE com o estoque atual de matéria-prima — considera a quantidade necessária por unidade em toda a cadeia (PA/PI/MP) e usa a MP mais escassa como gargalo. "Sem MP vinculada" = este PA não tem nenhuma MP na Estrutura (problema de cadastro, não de estoque).',
-    `<tr><th>Código</th><th>Descrição</th><th>Pode produzir?</th><th>MP gargalo</th></tr>`,
-    rows, 4
+    'Pra cada PA crítico, calcula quantas unidades dá pra produzir HOJE com o estoque atual de matéria-prima — considera a quantidade necessária por unidade em toda a cadeia (PA/PI/MP) e usa a MP mais escassa como gargalo. "Sem MP vinculada" = este PA não tem nenhuma MP na Estrutura (problema de cadastro, não de estoque). "Chegada prevista" é o primeiro embarque em trânsito dessa MP gargalo especificamente — não conta como estoque disponível hoje.',
+    `<tr><th>Código</th><th>Descrição</th><th>Pode produzir?</th><th>MP gargalo</th><th>Chegada prevista (MP gargalo)</th></tr>`,
+    rows, 5
   );
 }
 
@@ -2816,7 +2820,11 @@ function paMpBuildable(paCode) {
   const detail = mps.map(m => {
     const perUnit = memsDownstreamFactors(m.code)[upper] || 0;
     const buildable = perUnit > 0 ? Math.floor((m.stock || 0) / perUnit) : Infinity;
-    return { code: m.code, description: m.description, stock: m.stock || 0, perUnit, buildable };
+    const arrival = memsFirstArrivalEntry(m);
+    return {
+      code: m.code, description: m.description, stock: m.stock || 0, perUnit, buildable,
+      arrivalDate: arrival?.date || null, arrivalQty: arrival?.qty ?? null,
+    };
   });
   const bottleneck = detail.reduce((min, d) => d.buildable < min.buildable ? d : min, detail[0]);
   return { hasMP: true, buildable: bottleneck.buildable, bottleneck, mps: detail };
@@ -3047,6 +3055,16 @@ function memsNextArrival(item) {
     .map(e => e.arrivalDate ? new Date(e.arrivalDate) : null)
     .filter(d => d instanceof Date && !isNaN(d));
   return dates.length ? new Date(Math.min(...dates.map(d => d.getTime()))) : null;
+}
+// Embarque completo (data + qtd) do primeiro recebimento em trânsito — não só
+// a data, como memsNextArrival. Usado onde a quantidade que está chegando
+// importa tanto quanto o "quando".
+function memsFirstArrivalEntry(item) {
+  const entries = (item.transitEntries || [])
+    .map(e => ({ ...e, date: e.arrivalDate ? new Date(e.arrivalDate) : null }))
+    .filter(e => e.date instanceof Date && !isNaN(e.date));
+  if (!entries.length) return null;
+  return entries.reduce((min, e) => e.date < min.date ? e : min, entries[0]);
 }
 // Necessário antecipação: vai acabar antes do primeiro recebimento já em trânsito
 // (só faz sentido para itens que ainda não estão na fila de compra pendente)
