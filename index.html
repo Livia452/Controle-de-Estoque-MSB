@@ -1294,24 +1294,29 @@ function openCriticalChangesModal() {
 // Pra cada PA atualmente crítico (mesmo critério do card 🔴 acima, respeitando
 // o toggle "Incluir SA" da tela), analisa se há MP vinculada na Estrutura.
 function openCriticalMpModal() {
-  const criticals = state.getAll().filter(p => productStatus(p) === STATUS.CRIT).sort((a, b) => coverage(a) - coverage(b));
-  const rows = criticals.map(p => {
-    const info = paMpStatus(p.code);
-    const statusCell = info.hasMP ? `<span class="badge b-ok">Sim</span>`
-      : info.hasAny ? `<span class="badge b-warn">Só ME/MS</span>`
-      : `<span class="badge b-crit">Sem estrutura</span>`;
-    const matList = info.materials.length ? info.materials.map(m => `${m.code} (${m.type})`).join(', ') : '—';
+  const criticals = state.getAll().filter(p => productStatus(p) === STATUS.CRIT);
+  const withInfo = criticals.map(p => ({ p, info: paMpBuildable(p.code) }))
+    // pior caso primeiro (0 unidades), "sem MP vinculada" por último — é um
+    // problema de cadastro, não de estoque, então não é o mais urgente aqui.
+    .sort((a, b) => (a.info.hasMP ? a.info.buildable : Infinity) - (b.info.hasMP ? b.info.buildable : Infinity));
+  const rows = withInfo.map(({ p, info }) => {
+    const statusCell = !info.hasMP ? `<span class="badge b-nogiro">Sem MP vinculada</span>`
+      : info.buildable === 0 ? `<span class="badge b-crit">MP zerada</span>`
+      : `<span class="badge b-ok">${fmt.int(info.buildable)} un. possíveis</span>`;
+    const gargalo = info.bottleneck
+      ? `${info.bottleneck.code} — estoque ${fmt.int(info.bottleneck.stock)} (precisa ${Math.round(info.bottleneck.perUnit*1000)/1000}/un.)`
+      : '—';
     return `<tr>
       <td><strong>${p.code}</strong></td>
       <td class="td-desc"><div title="${p.description.replace(/"/g,'&quot;')}">${p.description}</div></td>
       <td>${statusCell}</td>
-      <td style="font-size:11px;color:var(--muted)">${matList}</td>
+      <td style="font-size:11px;color:var(--muted)">${gargalo}</td>
     </tr>`;
   }).join('');
   openDetailModal(
     `Estrutura (MP) dos críticos — ${criticals.length} produto${criticals.length===1?'':'s'}`,
-    'Pra cada PA crítico, verifica se há matéria-prima vinculada na Estrutura (Controle de Matérias). "Só ME/MS" = tem estrutura cadastrada mas nenhuma MP nela; "Sem estrutura" = este PA não tem BOM vinculada — não dá pra saber o que comprar pra repor.',
-    `<tr><th>Código</th><th>Descrição</th><th>Tem MP?</th><th>Materiais vinculados</th></tr>`,
+    'Pra cada PA crítico, calcula quantas unidades dá pra produzir HOJE com o estoque atual de matéria-prima — considera a quantidade necessária por unidade em toda a cadeia (PA/PI/MP) e usa a MP mais escassa como gargalo. "Sem MP vinculada" = este PA não tem nenhuma MP na Estrutura (problema de cadastro, não de estoque).',
+    `<tr><th>Código</th><th>Descrição</th><th>Pode produzir?</th><th>MP gargalo</th></tr>`,
     rows, 4
   );
 }
@@ -2796,13 +2801,25 @@ function materialsBelow(code) {
   }
   return [...found.values()];
 }
-// Análise "tem MP?" de um PA crítico: distingue "sem estrutura cadastrada"
-// de "tem estrutura, mas só ME/MS" de "tem MP" — porque pra quem vai decidir
-// uma compra, essas três situações pedem ações bem diferentes.
-function paMpStatus(paCode) {
-  const materials = materialsBelow(paCode);
-  const hasMP = materials.some(m => m.type === 'MP');
-  return { hasMP, hasAny: materials.length > 0, materials };
+// Quantas unidades desse PA dá pra produzir HOJE, olhando o estoque atual de
+// MP (matéria-prima) — não é "tem MP cadastrada", é "tem MP em quantidade
+// suficiente". Pra cada MP que alimenta o PA (direto ou via nó intermediário/
+// PI), memsDownstreamFactors dá a quantidade necessária por 1 unidade do PA
+// (mesmo fator multiplicativo que Controle de Matérias já usa pra cobertura
+// em cadeia — soma certo quando a mesma MP chega ao PA por mais de um
+// caminho). O gargalo é a MP com o menor "dá pra produzir": é ela que trava
+// a produção, mesmo que as outras MPs estejam de sobra.
+function paMpBuildable(paCode) {
+  const upper = String(paCode).toUpperCase();
+  const mps = materialsBelow(upper).filter(m => m.type === 'MP');
+  if (!mps.length) return { hasMP: false, buildable: null, bottleneck: null, mps: [] };
+  const detail = mps.map(m => {
+    const perUnit = memsDownstreamFactors(m.code)[upper] || 0;
+    const buildable = perUnit > 0 ? Math.floor((m.stock || 0) / perUnit) : Infinity;
+    return { code: m.code, description: m.description, stock: m.stock || 0, perUnit, buildable };
+  });
+  const bottleneck = detail.reduce((min, d) => d.buildable < min.buildable ? d : min, detail[0]);
+  return { hasMP: true, buildable: bottleneck.buildable, bottleneck, mps: detail };
 }
 // Estoque de um nó da estrutura, onde quer que ele viva: materiais (memsItems),
 // SA (estoque secundário do PA), PA (painel de indicadores) ou capturado no import (PIs)
