@@ -613,6 +613,11 @@ function statusFromCoverage(c) {
   return STATUS.CRIT;
 }
 function productStatus(p) {
+  // Marcação manual do cadastro: ignora estoque/consumo por completo. Existe
+  // pra vendas pontuais/forçadas (ex: um lote avulso, sem demanda real) que
+  // inflam avgConsumption e fariam o produto parecer crítico — sem apagar o
+  // histórico de vendas de verdade, só a classificação exibida é sobreposta.
+  if (p.forceNoGiro) return STATUS.NOGIRO;
   if (effectiveStock(p) === 0 && avgConsumption(p) === 0) return STATUS.NOGIRO;
   return statusFromCoverage(coverage(p));
 }
@@ -630,6 +635,7 @@ function officialCoverage(p) {
   return a > 0 ? eff / a : Infinity;
 }
 function officialStatus(p) {
+  if (p.forceNoGiro) return STATUS.NOGIRO;
   const eff = p.stock + (p.stockSA || 0);
   if (eff === 0 && avgConsumption(p) === 0) return STATUS.NOGIRO;
   return statusFromCoverage(officialCoverage(p));
@@ -883,6 +889,7 @@ function paRowToProduct(row) {
     salesHistory: row.sales_history || {},
     updatedAt: row.updated_at,
     saCode: row.sa_code || null,
+    forceNoGiro: !!row.force_no_giro,
   });
 }
 function paProductToRow(p, stamp) {
@@ -892,6 +899,7 @@ function paProductToRow(p, stamp) {
     sales_history: p.salesHistory || {},
     updated_at: stamp,
     sa_code: p.saCode || null,
+    force_no_giro: !!p.forceNoGiro,
   };
 }
 
@@ -960,6 +968,7 @@ const state = (() => {
       stockRetrabalho: Math.max(0, Math.round(Number(data.stockRetrabalho) || 0)),
       salesHistory:    data.salesHistory || {},
       saCode:          data.saCode ? String(data.saCode).trim().toUpperCase() : null,
+      forceNoGiro:     !!data.forceNoGiro,
     };
   }
 
@@ -2198,8 +2207,9 @@ function onSaveManual() {
     return;
   }
 
-  const family  = document.getElementById('f-family')?.value || '';
-  const saCode  = document.getElementById('f-sa-code')?.value.trim() || null;
+  const family      = document.getElementById('f-family')?.value || '';
+  const saCode      = document.getElementById('f-sa-code')?.value.trim() || null;
+  const forceNoGiro = !!document.getElementById('f-force-nogiro')?.checked;
   if (saCode) {
     const upperCode = code.toUpperCase();
     const dup = state.getAll().find(x => x.code !== upperCode && x.saCode?.toUpperCase() === saCode.toUpperCase());
@@ -2209,7 +2219,7 @@ function onSaveManual() {
   state.addOrUpdate({
     code, description: desc, family, stock: existing?.stock ?? 0,
     stockSA: existing?.stockSA ?? 0, stockRetrabalho: existing?.stockRetrabalho ?? 0,
-    salesHistory: existing?.salesHistory ?? {}, saCode,
+    salesHistory: existing?.salesHistory ?? {}, saCode, forceNoGiro,
   });
   closeProductModal();
   showToast(`Produto ${code.toUpperCase()} salvo.`);
@@ -5008,6 +5018,13 @@ function renderProductModalBody(code) {
         <input class="field-input" id="f-sa-code" type="text" placeholder="ex: SA-UFGH-035150RHR" style="max-width:280px"
           value="${isEdit ? (p.saCode || '') : ''}">
         <p style="font-size:12px;color:var(--hint);margin-top:4px">Vincula este PA ao código de estoque secundário/consignado do Dynamics. Deixe em branco se este produto não tiver SA.</p>
+      </div>
+      <div class="field-group">
+        <label class="filter-toggle">
+          <input type="checkbox" id="f-force-nogiro" ${isEdit && p.forceNoGiro ? 'checked' : ''}>
+          Forçar "Sem Giro" (ignora estoque e consumo no status)
+        </label>
+        <p style="font-size:12px;color:var(--hint);margin-top:4px">Pra produto com venda pontual/forçada que não reflete demanda real (ex: lote avulso) e está deixando o status Crítico/Atenção sem motivo. Não apaga o histórico de vendas — só sobrepõe a classificação exibida.</p>
       </div>
       <p style="font-size:12px;color:var(--hint);margin-bottom:16px">Estoque e vendas mensais são atualizados via importação de planilha.</p>
       <p class="field-error" id="form-error" role="alert" aria-live="polite"></p>

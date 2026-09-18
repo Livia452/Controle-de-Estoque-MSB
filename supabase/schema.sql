@@ -13,11 +13,13 @@ create table if not exists pa_products (
   stock_sa         integer not null default 0,
   stock_retrabalho integer not null default 0, -- pendente de retrabalho (já somado em "stock")
   sa_code          text, -- código SA vinculado a este PA (ex: 'SA-UFGH-035150RHR'), se houver
+  force_no_giro    boolean not null default false, -- marcação manual do cadastro: força status "Sem Giro" (venda pontual/forçada não reflete demanda real; não apaga sales_history)
   sales_history    jsonb not null default '{}'::jsonb, -- { "2026-01": 120, ... }
   updated_at       timestamptz not null default now()
 );
 alter table pa_products add column if not exists stock_retrabalho integer not null default 0;
 alter table pa_products add column if not exists sa_code text;
+alter table pa_products add column if not exists force_no_giro boolean not null default false;
 
 -- ── MATERIAIS (ME / MP / MS) ──────────────────────────────────────────
 create table if not exists materials (
