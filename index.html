@@ -599,14 +599,22 @@ function coverage(p) {
   const a = avgConsumption(p);
   return a > 0 ? effectiveStock(p) / a : Infinity;
 }
+// Classifica pelo mesmo corte que a tela mostra: arredonda a cobertura pra 1
+// casa decimal (igual fmt.cov) antes de comparar os limiares. Sem isso, um
+// produto com cobertura real 0,965 aparece na tela como "1,0 m" mas cai do
+// lado errado do corte e vira Crítico — o número já diz "1 mês", a
+// classificação tem que concordar com o que a pessoa está lendo.
+function statusFromCoverage(c) {
+  const r = Math.round(c * 10) / 10;
+  if (!Number.isFinite(r) || r > 12) return STATUS.EXCESS;
+  if (r >= 6)  return STATUS.HIGH;
+  if (r >= 2)  return STATUS.OK;
+  if (r >= 1)  return STATUS.WARN;
+  return STATUS.CRIT;
+}
 function productStatus(p) {
   if (effectiveStock(p) === 0 && avgConsumption(p) === 0) return STATUS.NOGIRO;
-  const c = coverage(p);
-  if (!Number.isFinite(c) || c > 12) return STATUS.EXCESS;
-  if (c >= 6)  return STATUS.HIGH;
-  if (c >= 2)  return STATUS.OK;
-  if (c >= 1)  return STATUS.WARN;
-  return STATUS.CRIT;
+  return statusFromCoverage(coverage(p));
 }
 
 /* Status "oficial" — sempre com SA incluído, independente do toggle "Incluir
@@ -624,12 +632,7 @@ function officialCoverage(p) {
 function officialStatus(p) {
   const eff = p.stock + (p.stockSA || 0);
   if (eff === 0 && avgConsumption(p) === 0) return STATUS.NOGIRO;
-  const c = officialCoverage(p);
-  if (!Number.isFinite(c) || c > 12) return STATUS.EXCESS;
-  if (c >= 6)  return STATUS.HIGH;
-  if (c >= 2)  return STATUS.OK;
-  if (c >= 1)  return STATUS.WARN;
-  return STATUS.CRIT;
+  return statusFromCoverage(officialCoverage(p));
 }
 // { CODE: description } de todo PA oficialmente crítico agora — a "foto"
 // que é comparada antes/depois de cada atualização de estoque/retrabalho/vendas.
