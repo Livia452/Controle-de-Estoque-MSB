@@ -87,6 +87,23 @@ create table if not exists pa_lots (
 create index if not exists pa_lots_code_idx   on pa_lots (code);
 create index if not exists pa_lots_expiry_idx on pa_lots (expiry);
 
+-- ── PREVISÃO DE RETORNO DE CARGAS (planilha "Cargas" do PCP) ──────────
+-- Snapshot: cada importação substitui a tabela inteira. Origem é uma
+-- planilha em blocos (1 bloco por carga, com Código PA/SA e datas de
+-- saída/retorno mescladas pra carga inteira) — não uma tabela simples;
+-- o parser (parseCargasSheet) já expande isso em 1 linha por (PA, carga).
+create table if not exists pa_carga_forecast (
+  id         bigint generated always as identity primary key,
+  code       text not null,            -- código do PA
+  sa_code    text not null default '',
+  carga      text not null default '', -- "Carga 08"
+  qty        numeric not null default 0,
+  saida      date,  -- Previsão de saída
+  retorno    date,  -- Retorno Esterelize — o que importa pra previsão de disponibilidade
+  updated_at timestamptz not null default now()
+);
+create index if not exists pa_carga_forecast_code_idx on pa_carga_forecast (code);
+
 -- ── SALDO POR LOTE (vem da importação de estoque, cruzado com pa_lots) ──
 -- A planilha de validade dá código+lote+validade; a de estoque dá o saldo
 -- atual de cada lote. A aba Alertas cruza os dois por (código + lote).
@@ -148,6 +165,7 @@ create table if not exists profiles (
 -- ═══════════════════════════════════════════════════════════════════════
 alter table pa_lots             enable row level security;
 alter table pa_lot_stock        enable row level security;
+alter table pa_carga_forecast   enable row level security;
 alter table pa_products         enable row level security;
 alter table materials           enable row level security;
 alter table materials_meta      enable row level security;
@@ -161,6 +179,12 @@ drop policy if exists pa_lots_read  on pa_lots;
 drop policy if exists pa_lots_write on pa_lots;
 create policy pa_lots_read  on pa_lots for select using (true);
 create policy pa_lots_write on pa_lots for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+drop policy if exists pa_carga_forecast_read  on pa_carga_forecast;
+drop policy if exists pa_carga_forecast_write on pa_carga_forecast;
+create policy pa_carga_forecast_read  on pa_carga_forecast for select using (true);
+create policy pa_carga_forecast_write on pa_carga_forecast for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 drop policy if exists pa_lot_stock_read  on pa_lot_stock;
