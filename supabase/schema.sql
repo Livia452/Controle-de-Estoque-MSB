@@ -149,6 +149,19 @@ create table if not exists pa_critical_changes (
 );
 insert into pa_critical_changes (id) values (true) on conflict (id) do nothing;
 
+-- ── MUDANÇAS DE CRITICIDADE DE MATERIAIS (Controle de Matérias) ───────
+-- Mesma ideia da tabela acima, pra ME/MP/MS: 1 linha só, sempre sobrescrita.
+-- "Crítico" é sempre calculado com consumo real (sem forecast), independente
+-- do toggle "Considerar Forecast" de quem está com a tela aberta.
+create table if not exists mems_critical_changes (
+  id          boolean primary key default true,
+  entered     jsonb not null default '[]'::jsonb, -- [{code,description,type}] que ficaram críticos nesta atualização
+  exited      jsonb not null default '[]'::jsonb, -- [{code,description,type}] que deixaram de ser críticos nesta atualização
+  computed_at timestamptz,
+  constraint mems_critical_changes_single_row check (id)
+);
+insert into mems_critical_changes (id) values (true) on conflict (id) do nothing;
+
 -- ── USUÁRIOS / PAPÉIS ──────────────────────────────────────────────────
 -- ligada ao login do Supabase (auth.users); role controla quem vê "Gerenciar usuários"
 create table if not exists profiles (
@@ -173,6 +186,7 @@ alter table materials_bom       enable row level security;
 alter table materials_bom_stock enable row level security;
 alter table slow_moving_analysis enable row level security;
 alter table pa_critical_changes  enable row level security;
+alter table mems_critical_changes enable row level security;
 alter table profiles            enable row level security;
 
 drop policy if exists pa_lots_read  on pa_lots;
@@ -233,6 +247,12 @@ drop policy if exists pa_critical_changes_read  on pa_critical_changes;
 drop policy if exists pa_critical_changes_write on pa_critical_changes;
 create policy pa_critical_changes_read  on pa_critical_changes for select using (true);
 create policy pa_critical_changes_write on pa_critical_changes for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+
+drop policy if exists mems_critical_changes_read  on mems_critical_changes;
+drop policy if exists mems_critical_changes_write on mems_critical_changes;
+create policy mems_critical_changes_read  on mems_critical_changes for select using (true);
+create policy mems_critical_changes_write on mems_critical_changes for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 
 -- is_admin roda como security definer (ignora RLS internamente) para checar

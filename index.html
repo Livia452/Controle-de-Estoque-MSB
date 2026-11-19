@@ -689,6 +689,61 @@ async function recordCriticalChange(before) {
   if (activeTab === 'dashboard') renderDashboard();
 }
 
+/* ── Mesma análise de entrou/saiu do crítico, pra MATERIAIS ───────────────
+   mems_critical_changes espelha pa_critical_changes (1 linha, sempre
+   sobrescrita). "Crítico" aqui é sempre calculado com CONSUMO REAL, sem
+   forecast — o mesmo valor padrão do toggle "Considerar Forecast", que é
+   preferência de cada navegador (localStorage); sem fixar, o histórico
+   mudaria conforme quem fez a importação deixou o toggle. Por isso a importação
+   de forecast NÃO registra mudança: com forecast fora da conta ela não
+   altera o status oficial, e gravaria um "nada mudou" por cima de uma mudança
+   real de um import anterior. */
+let memsCriticalChanges = { entered: [], exited: [], computedAt: null };
+
+async function loadMemsCriticalChanges() {
+  const { data, error } = await sb.from('mems_critical_changes').select('*').eq('id', true).maybeSingle();
+  if (error || !data) return { entered: [], exited: [], computedAt: null };
+  return { entered: data.entered || [], exited: data.exited || [], computedAt: data.computed_at };
+}
+async function saveMemsCriticalChanges(entered, exited) {
+  const computedAt = new Date().toISOString();
+  const { error } = await sb.from('mems_critical_changes').update({
+    entered, exited, computed_at: computedAt,
+  }).eq('id', true);
+  if (error) { showToast('Erro ao salvar mudanças de criticidade de materiais: ' + error.message, 'err'); return; }
+  memsCriticalChanges = { entered, exited, computedAt };
+}
+// memsStatus lê o toggle global memsUseForecast; força "desligado" só durante a
+// chamada (síncrona) em vez de duplicar a lógica de status, que é grande
+// (ramos em risco, cadeia, trânsito) e precisa continuar idêntica à da tela.
+function memsOfficialStatus(item) {
+  const saved = memsUseForecast;
+  memsUseForecast = false;
+  try { return memsStatus(item); } finally { memsUseForecast = saved; }
+}
+// { CODE: { description, type } } de todo material oficialmente crítico agora.
+// Devolve null se algo falhar — quem chama trata como "sem foto" e não registra,
+// pra esse recurso nunca derrubar uma importação de verdade.
+function memsCriticalSnapshot() {
+  try {
+    const map = {};
+    memsItems.forEach(i => {
+      if (memsOfficialStatus(i) === STATUS.CRIT) map[i.code] = { description: i.desc, type: i.type };
+    });
+    return map;
+  } catch (err) { console.warn('memsCriticalSnapshot:', err); return null; }
+}
+async function recordMemsCriticalChange(before) {
+  if (!before) return;
+  try {
+    const after = memsCriticalSnapshot();
+    if (!after) return;
+    const entered = Object.keys(after).filter(c => !(c in before)).map(c => ({ code: c, ...after[c] }));
+    const exited  = Object.keys(before).filter(c => !(c in after)).map(c => ({ code: c, ...before[c] }));
+    await saveMemsCriticalChanges(entered, exited);
+  } catch (err) { console.warn('recordMemsCriticalChange:', err); }
+}
+
 function salesTrend(p) {
   const ms   = getMonthlySales(p);
   const aOld = (ms[0]+ms[1]+ms[2]) / 3;
@@ -1256,13 +1311,14 @@ function buildKpis(products) {
 function buildAlert() { return ''; }
 
 /* ── Mudanças de criticidade + estrutura (MP) dos críticos ──────────────── */
-function buildCriticalChangesSection() {
-  const { entered, exited, computedAt } = paCriticalChanges;
-  const mpButton = `<div style="margin-bottom:1.25rem">
-      <button class="btn btn-ghost btn-sm" id="btn-crit-mp"><i class="ti ti-flask" aria-hidden="true"></i> Estrutura dos críticos (MP)</button>
-    </div>`;
-  if (!computedAt) return mpButton;
-
+// Banners "entrou/saiu do crítico" — compartilhado entre PA (Painel de
+// indicadores) e Materiais (Controle de Matérias); só mudam a origem dos dados,
+// o substantivo ("produto"/"material") e a função que abre a lista completa.
+// Vazio quando ainda não houve nenhuma atualização registrada.
+function buildChangesBanners(changes, noun, modalFn) {
+  const { entered, exited, computedAt } = changes;
+  if (!computedAt) return '';
+  const [sing, plur] = noun;
   const stamp = fmt.ts(computedAt);
   const MAX = 8;
   const chips = (items, cls) => {
@@ -1272,43 +1328,73 @@ function buildCriticalChangesSection() {
       return `<span class="${cls}"><strong>${i.code}</strong>${short ? `<span class="crit-chip-desc">${short}</span>` : ''}</span>`;
     }).join('');
     const more = items.length > MAX
-      ? `<span class="crit-more clickable-cell" onclick="openCriticalChangesModal()" title="Ver lista completa">+${items.length - MAX} mais</span>`
+      ? `<span class="crit-more clickable-cell" onclick="${modalFn}()" title="Ver lista completa">+${items.length - MAX} mais</span>`
       : '';
     return shown + more;
   };
   const enteredBlock = entered.length ? `<div class="alert-crit">
-      <div class="alert-crit-hd"><i class="ti ti-trending-up" aria-hidden="true"></i> ${entered.length} ${entered.length===1?'produto entrou':'produtos entraram'} em Crítico
-        <span class="alert-crit-sub clickable-cell" onclick="openCriticalChangesModal()">desde ${stamp} · ver detalhes</span></div>
+      <div class="alert-crit-hd"><i class="ti ti-trending-up" aria-hidden="true"></i> ${entered.length} ${entered.length===1?`${sing} entrou`:`${plur} entraram`} em Crítico
+        <span class="alert-crit-sub clickable-cell" onclick="${modalFn}()">desde ${stamp} · ver detalhes</span></div>
       <div class="alert-crit-chips">${chips(entered, 'crit-chip')}</div>
     </div>` : '';
   const exitedBlock = exited.length ? `<div class="alert-ok">
-      <div class="alert-ok-hd"><i class="ti ti-trending-down" aria-hidden="true"></i> ${exited.length} ${exited.length===1?'produto saiu':'produtos saíram'} de Crítico
-        <span class="alert-crit-sub clickable-cell" onclick="openCriticalChangesModal()">desde ${stamp} · ver detalhes</span></div>
+      <div class="alert-ok-hd"><i class="ti ti-trending-down" aria-hidden="true"></i> ${exited.length} ${exited.length===1?`${sing} saiu`:`${plur} saíram`} de Crítico
+        <span class="alert-crit-sub clickable-cell" onclick="${modalFn}()">desde ${stamp} · ver detalhes</span></div>
       <div class="alert-crit-chips">${chips(exited, 'ok-chip')}</div>
     </div>` : '';
   const nothingChanged = (!entered.length && !exited.length)
     ? `<p class="last-update" style="margin-bottom:1.25rem">Nenhuma mudança de criticidade desde a atualização de ${stamp}.</p>`
     : '';
-  return `${enteredBlock}${exitedBlock}${nothingChanged}${mpButton}`;
+  return `${enteredBlock}${exitedBlock}${nothingChanged}`;
 }
 
-// Lista completa de quem entrou/saiu do crítico na última atualização
-// (pa_critical_changes) — os chips na tela mostram só os primeiros.
-function openCriticalChangesModal() {
-  const { entered, exited, computedAt } = paCriticalChanges;
-  const stamp = computedAt ? fmt.ts(computedAt) : '—';
+// Lista completa de quem entrou/saiu na última atualização — os chips na tela
+// mostram só os primeiros. `extraCol` opcional: { head, cell(i) } p/ uma coluna a mais.
+function openChangesModal(changes, noun, subtitle, extraCol) {
+  const { entered, exited } = changes;
   const row = (i, dir) => `<tr>
     <td><strong>${i.code}</strong></td>
     <td class="td-desc"><div title="${(i.description||'').replace(/"/g,'&quot;')}">${i.description||''}</div></td>
+    ${extraCol ? `<td>${extraCol.cell(i)}</td>` : ''}
     <td>${dir === 'in' ? '<span class="badge b-crit">🔴 Entrou</span>' : '<span class="badge b-ok">🟢 Saiu</span>'}</td>
   </tr>`;
   const rows = [...entered.map(i => row(i, 'in')), ...exited.map(i => row(i, 'out'))].join('');
   const total = entered.length + exited.length;
   openDetailModal(
-    `Mudanças de criticidade — ${total} produto${total===1?'':'s'}`,
-    `Comparação entre o conjunto de PAs críticos antes e depois da atualização de ${stamp} (estoque, retrabalho ou vendas). Sempre calculado com SA incluído, independente do toggle "Incluir SA" da tela.`,
-    `<tr><th>Código</th><th>Descrição</th><th>Mudança</th></tr>`,
-    rows, 3
+    `Mudanças de criticidade — ${total} ${total===1?noun[0]:noun[1]}`,
+    subtitle,
+    `<tr><th>Código</th><th>Descrição</th>${extraCol ? `<th>${extraCol.head}</th>` : ''}<th>Mudança</th></tr>`,
+    rows, extraCol ? 4 : 3
+  );
+}
+
+function buildCriticalChangesSection() {
+  const mpButton = `<div style="margin-bottom:1.25rem">
+      <button class="btn btn-ghost btn-sm" id="btn-crit-mp"><i class="ti ti-flask" aria-hidden="true"></i> Estrutura dos críticos (MP)</button>
+    </div>`;
+  return buildChangesBanners(paCriticalChanges, ['produto', 'produtos'], 'openCriticalChangesModal') + mpButton;
+}
+
+// Lista completa de quem entrou/saiu do crítico na última atualização
+// (pa_critical_changes).
+function openCriticalChangesModal() {
+  const stamp = paCriticalChanges.computedAt ? fmt.ts(paCriticalChanges.computedAt) : '—';
+  openChangesModal(
+    paCriticalChanges, ['produto', 'produtos'],
+    `Comparação entre o conjunto de PAs críticos antes e depois da atualização de ${stamp} (estoque, retrabalho ou vendas). Sempre calculado com SA incluído, independente do toggle "Incluir SA" da tela.`
+  );
+}
+
+// Mesma análise, pra Controle de Matérias (mems_critical_changes).
+function buildMemsCriticalChangesSection() {
+  return buildChangesBanners(memsCriticalChanges, ['material', 'materiais'], 'openMemsCriticalChangesModal');
+}
+function openMemsCriticalChangesModal() {
+  const stamp = memsCriticalChanges.computedAt ? fmt.ts(memsCriticalChanges.computedAt) : '—';
+  openChangesModal(
+    memsCriticalChanges, ['material', 'materiais'],
+    `Comparação entre o conjunto de materiais críticos antes e depois da atualização de ${stamp} (estoque, consumo, trânsito, estrutura, retrabalho ou vendas). Sempre calculado com consumo real, independente do toggle "Considerar Forecast" da tela.`,
+    { head: 'Tipo', cell: i => i.type || '—' }
   );
 }
 
@@ -2030,6 +2116,10 @@ async function applyStockImport() {
   try {
     const { paItems, saItems, memsMatched, bomMatched = [] } = pendingStock;
     const criticalBefore = (paItems.length || saItems.length) ? criticalSnapshot() : null;
+    // Materiais: estoque de PA/SA e dos nós da estrutura entram na cobertura em
+    // cadeia, então toda importação de estoque pode mexer no status deles —
+    // a foto "antes" vai antes de qualquer mutação.
+    const memsCriticalBefore = memsCriticalSnapshot();
     if (paItems.length) await state.applyStockImport(paItems);
     if (saItems.length) await state.applyStockSAImport(saItems);
     if (criticalBefore) await recordCriticalChange(criticalBefore);
@@ -2046,6 +2136,7 @@ async function applyStockImport() {
     memsBomStock = {};
     bomMatched.forEach(item => { memsBomStock[item.code] = Math.max(0, Math.round(item.stock)); });
     await saveMemsBomStock();
+    await recordMemsCriticalChange(memsCriticalBefore);
     // saldo por lote (pra cruzar com a validade na aba Alertas) — só se a planilha
     // trouxe coluna de lote; senão preserva o que já havia pra não zerar à toa
     if (pendingStock.hasLot) {
@@ -2146,6 +2237,7 @@ async function applyRetrabalhoImport() {
   try {
     const { paItems, mpItems } = pendingRetrabalho;
     const criticalBefore = paItems.length ? criticalSnapshot() : null;
+    const memsCriticalBefore = memsCriticalSnapshot();
     await state.applyRetrabalhoImport(paItems);
     if (criticalBefore) await recordCriticalChange(criticalBefore);
     memsItems.forEach(i => { i.stock -= (i.stockRetrabalho || 0); i.stockRetrabalho = 0; });
@@ -2154,6 +2246,7 @@ async function applyRetrabalhoImport() {
       if (existing) { existing.stockRetrabalho = Math.max(0, Math.round(item.qty)); existing.stock += existing.stockRetrabalho; }
     });
     await saveMemsItems();
+    await recordMemsCriticalChange(memsCriticalBefore);
     showToast(`Retrabalho atualizado: ${paItems.length} PA · ${mpItems.length} materiais`);
     cancelRetrabalhoImport();
   } catch(err) {
@@ -2218,8 +2311,11 @@ function applySalesImport() {
   showLoading('Atualizando vendas…');
   setTimeout(async () => {
     const criticalBefore = criticalSnapshot();
+    // vendas de PA mudam o consumo por ramo da estrutura, que decide o "ramo em risco" dos materiais
+    const memsCriticalBefore = memsCriticalSnapshot();
     await state.applySalesImport(pendingSales.salesMap);
     await recordCriticalChange(criticalBefore);
+    await recordMemsCriticalChange(memsCriticalBefore);
     const n = Object.keys(pendingSales.salesMap).length;
     const m = pendingSales.months.map(fmtMonthKey).join(', ');
     hideLoading();
@@ -3259,6 +3355,8 @@ function renderMems() {
         </div>
       </div>
 
+      ${hasCat ? buildMemsCriticalChangesSection() : ''}
+
       ${!hasCat ? `
         <div class="tbl-wrap"><div class="empty" style="padding:3rem 2rem">
           <i class="ti ti-database-import" style="font-size:36px;color:var(--hint)"></i>
@@ -3621,7 +3719,8 @@ function renderMemsConsumoRawPreview(prevId, pending) {
 function applyMemsConsumoImport() {
   if (!pendingMemsConsumo) return;
   showLoading('Atualizando consumo…');
-  setTimeout(() => {
+  setTimeout(async () => {
+    const memsCriticalBefore = memsCriticalSnapshot();
     if (pendingMemsConsumo.raw) {
       pendingMemsConsumo.items.forEach(([code, monthData]) => {
         const existing = memsItems.find(i => i.code.toUpperCase() === code);
@@ -3641,6 +3740,7 @@ function applyMemsConsumoImport() {
     saveMemsItems();
     memsMeta.consumoUpdatedAt = new Date().toISOString();
     saveMemsMeta();
+    await recordMemsCriticalChange(memsCriticalBefore);
     const n = pendingMemsConsumo.items.length;
     resetMemsMaterialsSection();
     hideLoading();
@@ -3771,7 +3871,8 @@ function renderMemsTransitoPreview(prevId, pending) {
 function applyMemsTransitoImport() {
   if (!pendingMemsTransito) return;
   showLoading('Atualizando trânsito…');
-  setTimeout(() => {
+  setTimeout(async () => {
+    const memsCriticalBefore = memsCriticalSnapshot();
     memsItems.forEach(i => { i.inTransit = 0; i.transitEntries = []; });
     pendingMemsTransito.items.forEach(([code, data]) => {
       const existing = memsItems.find(i => i.code.toUpperCase() === code);
@@ -3782,6 +3883,7 @@ function applyMemsTransitoImport() {
     saveMemsItems();
     memsMeta.transitoUpdatedAt = new Date().toISOString();
     saveMemsMeta();
+    await recordMemsCriticalChange(memsCriticalBefore);
     const n = pendingMemsTransito.items.length;
     resetMemsMaterialsSection();
     hideLoading();
@@ -3885,12 +3987,14 @@ async function handleMemsBomFile(file) {
 function applyMemsBomImport() {
   if (!pendingMemsBom) return;
   showLoading('Atualizando estrutura…');
-  setTimeout(() => {
+  setTimeout(async () => {
+    const memsCriticalBefore = memsCriticalSnapshot(); // com a estrutura e o índice de ramos ANTIGOS
     memsBom = pendingMemsBom.edges;
     _bomIdx = null; // índices de ramo seco dependem da estrutura
     saveMemsBom();
     memsMeta.bomUpdatedAt = new Date().toISOString();
     saveMemsMeta();
+    await recordMemsCriticalChange(memsCriticalBefore);
     const n = memsBom.length;
     resetMemsMaterialsSection();
     hideLoading();
@@ -5087,7 +5191,7 @@ async function boot() {
     currentSession = sessionData?.session ?? null;
     await loadCurrentProfile();
 
-    const [products, materials, meta, bom, bomStock, lots, lotStock, slowMoving, criticalChanges, cargaForecast] = await Promise.all([
+    const [products, materials, meta, bom, bomStock, lots, lotStock, slowMoving, criticalChanges, cargaForecast, memsCritChanges] = await Promise.all([
       storage.load(),
       loadMemsItems(),
       loadMemsMeta(),
@@ -5098,6 +5202,7 @@ async function boot() {
       loadSlowMoving(),
       loadPaCriticalChanges(),
       loadPaCargaForecast(),
+      loadMemsCriticalChanges(),
     ]);
     state._setAll(products);
     memsItems    = materials;
@@ -5109,6 +5214,7 @@ async function boot() {
     slowMovingCurated = slowMoving;
     paCriticalChanges = criticalChanges;
     paCargaForecast = cargaForecast;
+    memsCriticalChanges = memsCritChanges;
     await syncMemsSeedAdditions();
     await syncSlowMovingSeed();
     await backfillSaCodes();
